@@ -1,0 +1,169 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Verus: A Lambda Calculus Alternative to MISRA-C and CompCert\\
+{\footnotesize https://github.com/adam-mcdaniel/verus}}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} Adam McDaniel}
+\IEEEauthorblockA{\textit{Electrical Engineering and Computer Science Dept.} \\
+\textit{University of Tennessee}\\
+Knoxille, USA \\
+amcdan23@vols.utk.edu}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Alexander Krneta}
+\IEEEauthorblockA{\textit{Electrical Engineering and Computer Science Dept.} \\
+\textit{University of Tennessee}\\
+Knoxille, USA \\
+akrneta@vols.utk.edu}
+}
+
+\maketitle
+
+\begin{abstract}
+Formally verified programming languages, such as MISRA-C and CompCert, play a crucial role in safety-critical systems by preventing classes of bugs that could result in catastrophic failures. However, these languages are based on C, which introduces unnecessary complexity and limitations due to its imperative and low-level nature. We propose a new formally verified language based on the simply-typed lambda calculus, offering stronger static guarantees, improved expressiveness, and reduced developer burden. This project aims to investigate whether such a language can replace formally verified C while maintaining the same safety assurances and improving productivity.
+\end{abstract}
+
+\begin{IEEEkeywords}
+compilers, functional programming, formal verification
+\end{IEEEkeywords}
+
+\section{Introduction}
+Formal verification techniques are essential for ensuring the safety of software used in medical, automotive, and aerospace industries. Tools like MISRA-C and CompCert impose strict constraints on C to ensure properties like memory safety and termination. However, these constraints make development cumbersome and limit the efficiency of formally verified C programs. 
+
+\subsection{Research Need}
+
+Formal verification strategies are \emph{absolutely necessary} for safety-critical systems; software failures in C have led to catastrophic consequences. The Therac-25 radiation therapy machine malfunctioned due to integer overflows and race conditions in C, leading to lethal overdoses. The Boeing 737 Max control system, also written in C, suffered from safety-critical defects that contributed to two crashes.
+
+C is the dominant language for safety-critical systems, but its imperative nature presents significant verification challenges. The flexibility of pointer arithmetic, manual memory management, and weak type safety force verification tools like MISRA-C and CompCert to adopt overly conservative constraints, requiring extensive manual proof effort from developers.
+
+\subsection{Research Question}
+
+How can we design a formally verified language on a more expressive foundation than C, while maintaining the same safety guarantees and improving developer productivity? What trade-offs arise when replacing formally verified C with a formally verified functional language?
+
+\section{Related Work}
+Several functional and dependently typed languages have been explored for formal verification, including:
+
+\begin{itemize}
+    \item \textbf{Agda}: A dependently typed functional programming language that ensures correctness via proofs.
+    \item \textbf{F*}: A functional language with dependent types, designed for verified programming.
+    \item \textbf{Dafny}: A verification-aware programming language that enforces correctness through specifications.
+    \item \textbf{Linear Haskell}: A linear type system extension to Haskell that ensures safe resource usage.
+\end{itemize}
+
+While these languages focus on verification, they are not intended as direct replacements for formally verified C in safety-critical applications. Our work seeks to bridge this gap.
+
+\section{Method}
+
+\subsection{Language Design}
+We propose a formally verified language based on the Simply Typed Lambda Calculus (STLC), incorporating:
+
+\begin{itemize}
+    \item \textbf{Sum and Product Types}: For expressiveness without requiring unsafe unions.
+    \item \textbf{Total Functions}: Guaranteed termination, eliminating the need for manual proofs.
+    \item \textbf{C-like syntax}: Providing a better programming interface for those transitioning from MISRA-C and CompCert compared to other formally verified languages like Agda.
+    \item \textbf{C Foreign Function Interface}: For easily interacting with existing IO tools and writing \emph{useful} programs.
+\end{itemize}
+
+\subsection{Implementation Approach}
+
+We will implement a prototype compiler that:
+
+\begin{enumerate}
+    \item Parses a C-like syntax using \textbf{nom} in Rust.
+    \item Type-checks according to the simply-typed lambda calculus typechecking rules, which are straightforward and easy to implement. These will enforce our safety guarantees.
+    \item Compiles to the high-level C-like language Clover. Clover provides a convenient interface for compiling to LLVM with a simple C FFI system. This will significantly reduce the complexity of the frontend compiler.
+\end{enumerate}
+
+\subsection{Validation}
+
+Finally, we will compare the new language approach to existing tools:
+
+\begin{enumerate}
+    \item \textbf{Expressiveness}: We'll measure the expressiveness against standards like MISRA-C and CompCert by comparing equivalent example programs in each language.
+    \item \textbf{Performance}: Evaluate the efficiency of compiled code.
+    
+\end{enumerate}
+
+\section{Schedule and Project Management}
+
+Writing a compiler is a daunting task. To simplify the pipeline of compilation, we'll leverage Clover to make our backend significantly less complex. This will allow our frontend to be significantly smaller, and make the complexity of the project managable for a single semester. Implementing simply-typed lambda calculus is much easier than typesystems like System F, which can be done in $<1000$ lines depending on the implementation language. Below is the planned development schedule accounting for the difficulty of each component.
+
+\begin{table}[h!]
+    \centering
+    \label{tab:schedule}
+    \caption{Project Schedule}
+    \begin{tabular}{|c|c|}
+        \hline
+         Week & Task \\
+         \hline
+         1 & Implement a recursive descent parser with \textbf{nom} for the AST.\\ \hline
+         2-3 & Implement a minimal type checker for the STLC type system. \\ \hline
+         4-6 & Develop code generation for the Clover backend. \\ \hline
+         7 & Write example code and compare to existing tools. \\ \hline
+    \end{tabular}
+\end{table}
+
+\section{Project Team}
+
+Our project team consists of:
+
+\begin{itemize}
+    \item \textbf{Adam McDaniel}
+    \item \textbf{Alexander Krneta}
+\end{itemize}
+
+Here's a list of related projects our team has worked on before:
+
+\subsection{Compilers}
+\begin{itemize}
+    \item \href{https://github.com/adam-mcdaniel/sage}{Sage Programming Language}
+    \item \href{https://github.com/adam-mcdaniel/oakc}{Oak Programming Language}
+    \item \href{https://github.com/adam-mcdaniel/harbor}{Harbor Programming Language}
+    \item \href{https://github.com/adam-mcdaniel/tsar}{Tsar Programming Language}
+    \item \href{https://github.com/adam-mcdaniel/basm}{BASM Assembler}
+    \item \href{https://github.com/adam-mcdaniel/free}{Free Programming Language}
+    \item \href{https://github.com/adam-mcdaniel/wisp-bootstrap}{Bootstrapped Wisp Compiler}
+    \item \href{https://github.com/adam-mcdaniel/smpl}{Extended BrainF\!\$\@ Compiler}
+\end{itemize}
+
+\subsection{Interpreters}
+\begin{itemize}
+    \item \href{https://github.com/adam-mcdaniel/sage-lisp}{Sage-Lisp}
+    \item \href{https://github.com/adam-mcdaniel/wisp}{Wisp}
+    \item \href{https://adam-mcdaniel.github.io/harbor}{Dynamic BrainF\!\$\@ Web Interpreter}
+    \item \href{https://github.com/adam-mcdaniel/dune}{Dune Scripting Language}
+    \item \href{https://github.com/adam-mcdaniel/maroon-lang}{Maroon Functional Programming Language}
+\end{itemize}
+
+\subsection{Formal Methods}
+\begin{itemize}
+    \item \href{https://github.com/adam-mcdaniel/reckon}{Reckon - A Prolog-like Theorem Prover}
+\end{itemize}
+
+\section{Expected Results}
+
+We expect to demonstrate that a functional language with strong type guarantees can provide the same level of formal verification as MISRA-C and CompCert while reducing developer burden. The outcome will include:
+
+\begin{itemize}
+    \item A formally verified language prototype.
+    \item Benchmarks comparing verification effort and performance with existing tools.
+    \item Insights into trade-offs between imperative and functional verification approaches.
+\end{itemize}
+
+\section{Conclusion}
+
+Our proposed research seeks to modernize formally verified programming for safety-critical systems by replacing C with a lambda calculus-based approach. By leveraging advanced type systems, we aim to make verification more expressive, efficient, and developer-friendly.
+
+\end{document}
