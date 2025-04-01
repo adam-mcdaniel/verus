@@ -163,9 +163,30 @@ pub enum Type {
     Char,
     Bool,
     Int,
+    Float,
     Void,
     /// A named type.
     Name(Symbol),
+}
+
+impl Type {
+    pub fn name(name: impl ToString) -> Self {
+        Type::Name(name.to_string())
+    }
+
+    pub fn record(fields: impl IntoIterator<Item = (Symbol, Type)>) -> Self {
+        let map = fields.into_iter()
+            .map(|(name, ty)| (name, Box::new(ty)))
+            .collect();
+        Type::Record(map)
+    }
+
+    pub fn enum_variants(variants: impl IntoIterator<Item = (Symbol, Type)>) -> Self {
+        let map = variants.into_iter()
+            .map(|(name, ty)| (name, Box::new(ty)))
+            .collect();
+        Type::Enum(map)
+    }
 }
 
 impl Display for Type {
@@ -197,6 +218,7 @@ impl Display for Type {
             Char => write!(f, "Char"),
             Bool => write!(f, "Bool"),
             Int => write!(f, "Int"),
+            Float => write!(f, "Float"),
             Void => write!(f, "Void"),
             Name(name) => write!(f, "{}", name),
         }
@@ -267,6 +289,7 @@ impl Display for Pattern {
 pub enum Const {
     List(Vec<Const>),
     Int(i64),
+    Float(f64),
     Str(String),
     Char(char),
     Bool(bool),
@@ -277,11 +300,26 @@ pub enum Const {
     Builtin(Builtin),
 }
 
+impl Const {
+    pub fn record<T>(fields: impl IntoIterator<Item = (T, Const)>) -> Self where T: Into<Symbol> {
+        let mut map = BTreeMap::new();
+        for (name, val) in fields {
+            map.insert(name.into(), val);
+        }
+        Const::Record(map)        
+    }
+
+    pub fn variant(typ: Type, name: impl Into<Symbol>, inner: Const) -> Self {
+        Const::Variant(typ, name.into(), Box::new(inner))
+    }
+}
+
 impl Display for Const {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         use Const::*;
         match self {
             Int(n) => write!(f, "{}", n),
+            Float(n) => write!(f, "{}", n),
             Str(s) => write!(f, "{:?}", s),
             Char(c) => write!(f, "{:?}", c),
             Bool(b) => write!(f, "{}", b),
@@ -355,6 +393,12 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub const VOID: Expr = Expr::Const(Const::Void);
+
+    pub fn var(name: impl ToString) -> Expr {
+        Expr::Var(name.to_string())
+    }
+
     /// Strip annotations recursively.
     pub fn strip_annotations(&self) -> &Self {
         match self {

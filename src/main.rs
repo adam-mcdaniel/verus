@@ -15,11 +15,11 @@ fn main() {
         "x -> { x }",
     ];
 
-    for input in &inputs {
-        let mut parser = Parser::new(input);
-        match parser.parse_expr() {
-            Ok(expr) => println!("Input: {}\nParsed AST: {:?}\n", input, expr),
-            Err(e) => println!("Input: {}\nError: {}\n", input, e),
-        }
-    }
+    // for input in &inputs {
+    //     let mut parser = Parser::new(input);
+    //     match parser.parse_expr() {
+    //         Ok(expr) => println!("Input: {}\nParsed AST: {:?}\n", input, expr),
+    //         Err(e) => println!("Input: {}\nError: {}\n", input, e),
+    //     }
+    // }
 }
