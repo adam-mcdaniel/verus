@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.96"
 clover = { git = "https://github.com/adam-mcdaniel/clover" }
+nom = "^7"
 thiserror = "2.0.11"
