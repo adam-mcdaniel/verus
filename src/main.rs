@@ -3,8 +3,7 @@ fn main() {
     println!("Hello, world!");
 }
 */
-mod parser; // This tells Rust to include src/parser.rs as a module.
-use parser::Parser; // Now we can use Parser here.
+use verus::*;
 
 fn main() {
     let inputs = [

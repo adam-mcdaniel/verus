@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::cell::RefCell;
 
-use crate::ast::*; // Assume your AST types (Expr, Const, Type, Pattern, Builtin, etc.) are defined here.
+use crate::*; // Assume your AST types (Expr, Const, Type, Pattern, Builtin, etc.) are defined here.
 use anyhow::anyhow;
 
 // A simple recursive descent parser.
