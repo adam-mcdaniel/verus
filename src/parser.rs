@@ -265,11 +265,12 @@ where
 
 /// Parse a string. Use a loop of parse_fragment and push all of the fragments
 /// into an output string.
-fn parse_string<'a, E>(
-    input: &'a str,
-) -> IResult<&'a str, String, E>
+fn parse_string<'a, E>(input: &'a str) -> IResult<&'a str, String, E>
 where
-    E: ParseError<&'a str> + ContextError<&'a str> + ParseError<&'a str> + FromExternalError<&'a str, std::num::ParseIntError>,
+    E: ParseError<&'a str>
+        + ContextError<&'a str>
+        + ParseError<&'a str>
+        + FromExternalError<&'a str, std::num::ParseIntError>,
 {
     // fold is the equivalent of iterator::fold. It runs a parser in a loop,
     // and for each output value, calls a folding function on each output value.
@@ -692,14 +693,11 @@ pub fn parse(input: &str) -> Result<Expr, String> {
         Err(e) => {
             // Convert the error to a string
             let err_str = match e {
-                nom::Err::Error(e) | nom::Err::Failure(e) => {
-                    convert_error(input, e)
-                }
+                nom::Err::Error(e) | nom::Err::Failure(e) => convert_error(input, e),
                 nom::Err::Incomplete(_) => "Incomplete input".to_string(),
             };
             Err(err_str)
         }
-
     }
 }
 
