@@ -1,11 +1,12 @@
+use super::*;
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag, take_while, take_while1, take_while_m_n},
     character::complete::{char, digit1, hex_digit1, multispace1, oct_digit1},
     combinator::{all_consuming, cut, map, map_opt, opt, recognize, verify},
     error::{ContextError, ParseError},
-    multi::{fold_many0, many0, many1, many0_count, separated_list0},
-    sequence::{delimited, pair, preceded, terminated, tuple, separated_pair},
+    multi::{fold_many0, many0, many0_count, many1, separated_list0},
+    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult, Parser,
 };
 use nom::{
@@ -13,7 +14,6 @@ use nom::{
     combinator::value,
     error::{convert_error, ErrorKind, FromExternalError, VerboseError},
 };
-use super::*;
 
 const KEYWORDS: &[&str] = &[
     "fun", "struct", "enum", "mut", "let", "if", "else", "while", "for", "return", "match",
@@ -169,7 +169,10 @@ where
             value('\'', char('\'')),
             // Parse an \x followed by two hex digits, and convert it to a char
             map(
-                preceded(char('x'), take_while_m_n(2, 2, |c: char| c.is_ascii_hexdigit())),
+                preceded(
+                    char('x'),
+                    take_while_m_n(2, 2, |c: char| c.is_ascii_hexdigit()),
+                ),
                 |hex| u8::from_str_radix(hex, 16).unwrap() as char,
             ),
             // Parse an \u followed by four hex digits, and convert it to a char
@@ -262,7 +265,9 @@ where
 
 /// Parse a string. Use a loop of parse_fragment and push all of the fragments
 /// into an output string.
-fn parse_string<'a, E: ParseError<&'a str> + ContextError<&'a str>>(input: &'a str) -> IResult<&'a str, String, E>
+fn parse_string<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, String, E>
 where
     E: ParseError<&'a str> + FromExternalError<&'a str, std::num::ParseIntError>,
 {
@@ -371,7 +376,11 @@ fn parse_symbol<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         many0_count(alt((alphanumeric1, tag("_")))),
     ))(input)?;
     if KEYWORDS.contains(&result) {
-        return Err(nom::Err::Error(E::add_context(input, "Expected symbol, got a keyword", E::from_error_kind(input, ErrorKind::Tag))));
+        return Err(nom::Err::Error(E::add_context(
+            input,
+            "Expected symbol, got a keyword",
+            E::from_error_kind(input, ErrorKind::Tag),
+        )));
     }
     Ok((input, result))
 }
@@ -386,12 +395,24 @@ fn parse_type_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, fields) = cut(separated_list0(
         delimited(whitespace, char(','), whitespace),
-        separated_pair(parse_symbol, delimited(whitespace, char(':'), whitespace), parse_type),
+        separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_type,
+        ),
     ))(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
-    Ok((input, Type::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect())))
+    Ok((
+        input,
+        Type::Record(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.into()))
+                .collect(),
+        ),
+    ))
 }
 
 fn parse_type_enum<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -406,13 +427,23 @@ fn parse_type_enum<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         delimited(whitespace, tag("|"), whitespace),
         alt((
             separated_pair(parse_symbol, whitespace, parse_type),
-            map(delimited(whitespace, parse_symbol, whitespace), |s| (s, Type::Void)),
+            map(delimited(whitespace, parse_symbol, whitespace), |s| {
+                (s, Type::Void)
+            }),
         )),
     )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
-    Ok((input, Type::Enum(fields.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect())))
+    Ok((
+        input,
+        Type::Enum(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.into()))
+                .collect(),
+        ),
+    ))
 }
 
 fn parse_type_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -469,10 +500,6 @@ fn parse_type<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     ))(input)
 }
 
-
-
-
-
 fn parse_const_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Const, E> {
@@ -481,12 +508,19 @@ fn parse_const_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, fields) = cut(separated_list0(
         delimited(whitespace, char(','), whitespace),
-        separated_pair(parse_symbol, delimited(whitespace, char(':'), whitespace), parse_const),
+        separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_const,
+        ),
     ))(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
-    Ok((input, Const::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())))
+    Ok((
+        input,
+        Const::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()),
+    ))
 }
 
 fn parse_const_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -520,7 +554,14 @@ fn parse_const_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     // Parse the value
     let (input, value) = opt(parse_const)(input)?;
 
-    Ok((input, Const::Variant(ty, variant.to_owned(), Box::new(value.unwrap_or(Const::Void)))))
+    Ok((
+        input,
+        Const::Variant(
+            ty,
+            variant.to_owned(),
+            Box::new(value.unwrap_or(Const::Void)),
+        ),
+    ))
 }
 
 fn parse_const_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -562,12 +603,19 @@ fn parse_expr_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, fields) = cut(separated_list0(
         delimited(whitespace, char(','), whitespace),
-        separated_pair(parse_symbol, delimited(whitespace, char(':'), whitespace), parse_expr),
+        separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_expr,
+        ),
     ))(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
-    Ok((input, Expr::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())))
+    Ok((
+        input,
+        Expr::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()),
+    ))
 }
 
 fn parse_expr_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -585,7 +633,14 @@ fn parse_expr_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     // Parse the value
     let (input, value) = opt(parse_expr)(input)?;
 
-    Ok((input, Expr::Variant(ty, variant.to_owned(), Box::new(value.unwrap_or(Expr::VOID)))))
+    Ok((
+        input,
+        Expr::Variant(
+            ty,
+            variant.to_owned(),
+            Box::new(value.unwrap_or(Expr::VOID)),
+        ),
+    ))
 }
 
 fn parse_expr_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -636,23 +691,27 @@ mod tests {
     #[test]
     fn test_parse_const_record() {
         let input_and_expected = [
-            ("{x: 1, y: 2}", Const::record([
-                ("x", Const::Int(1)),
-                ("y", Const::Int(2)),
-            ])),
-
-            ("{x: 1, y: 2, z: 3}", Const::record([
-                ("x", Const::Int(1)),
-                ("y", Const::Int(2)),
-                ("z", Const::Int(3)),
-            ])),
-
-            ("{x: 1, y: 2, z: 3, w: 4.0}", Const::record([
-                ("x", Const::Int(1)),
-                ("y", Const::Int(2)),
-                ("z", Const::Int(3)),
-                ("w", Const::Float(4.0)),
-            ])),
+            (
+                "{x: 1, y: 2}",
+                Const::record([("x", Const::Int(1)), ("y", Const::Int(2))]),
+            ),
+            (
+                "{x: 1, y: 2, z: 3}",
+                Const::record([
+                    ("x", Const::Int(1)),
+                    ("y", Const::Int(2)),
+                    ("z", Const::Int(3)),
+                ]),
+            ),
+            (
+                "{x: 1, y: 2, z: 3, w: 4.0}",
+                Const::record([
+                    ("x", Const::Int(1)),
+                    ("y", Const::Int(2)),
+                    ("z", Const::Int(3)),
+                    ("w", Const::Float(4.0)),
+                ]),
+            ),
         ];
 
         for (input, expected) in input_and_expected {
@@ -665,18 +724,19 @@ mod tests {
     #[test]
     fn test_parse_const_list() {
         let input_and_expected = [
-            ("[1, 2, 3]", Const::List(vec![
-                Const::Int(1),
-                Const::Int(2),
-                Const::Int(3),
-            ])),
-
-            ("[1, 2, 3, 4.0]", Const::List(vec![
-                Const::Int(1),
-                Const::Int(2),
-                Const::Int(3),
-                Const::Float(4.0),
-            ])),
+            (
+                "[1, 2, 3]",
+                Const::List(vec![Const::Int(1), Const::Int(2), Const::Int(3)]),
+            ),
+            (
+                "[1, 2, 3, 4.0]",
+                Const::List(vec![
+                    Const::Int(1),
+                    Const::Int(2),
+                    Const::Int(3),
+                    Const::Float(4.0),
+                ]),
+            ),
         ];
 
         for (input, expected) in input_and_expected {
@@ -689,16 +749,19 @@ mod tests {
     #[test]
     fn test_parse_const_variant() {
         let input_and_expected = [
-            ("{Some(Int) | None} of None", Const::variant(
-                Type::enum_variants([
-                    ("Some".to_owned(), Type::Int),
-                    ("None".to_owned(), Type::Void),
-                ]),
-                "None",
-                Const::Void,
-            )),
-
-            ("{Some(Int) | None} of Some(5)",
+            (
+                "{Some(Int) | None} of None",
+                Const::variant(
+                    Type::enum_variants([
+                        ("Some".to_owned(), Type::Int),
+                        ("None".to_owned(), Type::Void),
+                    ]),
+                    "None",
+                    Const::Void,
+                ),
+            ),
+            (
+                "{Some(Int) | None} of Some(5)",
                 Const::variant(
                     Type::enum_variants([
                         ("Some".to_owned(), Type::Int),
@@ -706,7 +769,7 @@ mod tests {
                     ]),
                     "Some",
                     Const::Int(5),
-                )
+                ),
             ),
         ];
 
@@ -720,18 +783,23 @@ mod tests {
     #[test]
     fn test_parse_expr_list() {
         let input_and_expected = [
-            ("[1, 2, 3]", Expr::List(vec![
-                Expr::Const(Const::Int(1)),
-                Expr::Const(Const::Int(2)),
-                Expr::Const(Const::Int(3)),
-            ])),
-
-            ("[1, 2, 3, 4.0]", Expr::List(vec![
-                Expr::Const(Const::Int(1)),
-                Expr::Const(Const::Int(2)),
-                Expr::Const(Const::Int(3)),
-                Expr::Const(Const::Float(4.0)),
-            ])),
+            (
+                "[1, 2, 3]",
+                Expr::List(vec![
+                    Expr::Const(Const::Int(1)),
+                    Expr::Const(Const::Int(2)),
+                    Expr::Const(Const::Int(3)),
+                ]),
+            ),
+            (
+                "[1, 2, 3, 4.0]",
+                Expr::List(vec![
+                    Expr::Const(Const::Int(1)),
+                    Expr::Const(Const::Int(2)),
+                    Expr::Const(Const::Int(3)),
+                    Expr::Const(Const::Float(4.0)),
+                ]),
+            ),
         ];
 
         for (input, expected) in input_and_expected {
@@ -741,34 +809,37 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_type_enum() -> anyhow::Result<()> {
         let input_and_expected = [
-            ("{Some(Int) | None}", Type::enum_variants([
-                ("Some".to_owned(), Type::Int),
-                ("None".to_owned(), Type::Void),
-            ])),
-
-            ("{Some(Int) | None | Another(Float)}", Type::enum_variants([
-                ("Some".to_owned(), Type::Int),
-                ("None".to_owned(), Type::Void),
-                ("Another".to_owned(), Type::Float),
-            ])),
+            (
+                "{Some(Int) | None}",
+                Type::enum_variants([
+                    ("Some".to_owned(), Type::Int),
+                    ("None".to_owned(), Type::Void),
+                ]),
+            ),
+            (
+                "{Some(Int) | None | Another(Float)}",
+                Type::enum_variants([
+                    ("Some".to_owned(), Type::Int),
+                    ("None".to_owned(), Type::Void),
+                    ("Another".to_owned(), Type::Float),
+                ]),
+            ),
         ];
 
         for (input, expected) in input_and_expected {
-            let (_, result) = all_consuming(parse_type_enum)(input).map_err(|e| {
-                match e {
-                    nom::Err::Error(e) | nom::Err::Failure(e) => {
-                        convert_error(input, e)
-                    }
+            let (_, result) = all_consuming(parse_type_enum)(input)
+                .map_err(|e| match e {
+                    nom::Err::Error(e) | nom::Err::Failure(e) => convert_error(input, e),
                     nom::Err::Incomplete(_) => unreachable!(),
-                }
-            }).map_err(anyhow::Error::msg)?;
+                })
+                .map_err(anyhow::Error::msg)?;
             println!("{input:?} -> {result:?}");
+            assert_eq!(result, expected);
         }
-        
+
         Ok(())
     }
 }

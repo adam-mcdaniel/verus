@@ -1,11 +1,11 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::rc::Rc;
-use std::cell::RefCell;
 use std::sync::Arc;
 
-use thiserror::Error;
 use anyhow::{anyhow, Result};
+use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceCodeLocation {
@@ -114,13 +114,10 @@ pub enum CheckError {
 
     #[error("{0}")]
     Custom(Arc<anyhow::Error>),
-    
+
     #[error("Variable \"{name}\" not found in {expr}")]
-    VariableNotFound {
-        name: Symbol,
-        expr: Expr,
-    },
-    
+    VariableNotFound { name: Symbol, expr: Expr },
+
     #[error("Type {0} not found")]
     TypeNotFound(Symbol),
 
@@ -136,7 +133,7 @@ pub enum CheckError {
 
     #[error("Unexpanded macro used in expression {0}")]
     UnexpandedMacro(Expr),
-    
+
     #[error("Non-exhaustive match in {0}")]
     NonExhaustiveMatch(Expr),
 }
@@ -175,14 +172,16 @@ impl Type {
     }
 
     pub fn record(fields: impl IntoIterator<Item = (Symbol, Type)>) -> Self {
-        let map = fields.into_iter()
+        let map = fields
+            .into_iter()
             .map(|(name, ty)| (name, Box::new(ty)))
             .collect();
         Type::Record(map)
     }
 
     pub fn enum_variants(variants: impl IntoIterator<Item = (Symbol, Type)>) -> Self {
-        let map = variants.into_iter()
+        let map = variants
+            .into_iter()
             .map(|(name, ty)| (name, Box::new(ty)))
             .collect();
         Type::Enum(map)
@@ -301,12 +300,15 @@ pub enum Const {
 }
 
 impl Const {
-    pub fn record<T>(fields: impl IntoIterator<Item = (T, Const)>) -> Self where T: Into<Symbol> {
+    pub fn record<T>(fields: impl IntoIterator<Item = (T, Const)>) -> Self
+    where
+        T: Into<Symbol>,
+    {
         let mut map = BTreeMap::new();
         for (name, val) in fields {
             map.insert(name.into(), val);
         }
-        Const::Record(map)        
+        Const::Record(map)
     }
 
     pub fn variant(typ: Type, name: impl Into<Symbol>, inner: Const) -> Self {
@@ -517,7 +519,9 @@ impl Expr {
         match self {
             Expr::Annotated(metadata, expr) => {
                 // Evaluate the inner expression and attach metadata to the result.
-                expr.strip_annotations().eval(env).with_metadata(metadata.clone())
+                expr.strip_annotations()
+                    .eval(env)
+                    .with_metadata(metadata.clone())
             }
             Expr::List(exprs) => {
                 let mut list = Vec::new();
@@ -529,16 +533,14 @@ impl Expr {
             Expr::Const(c) => Ok(c.clone()),
             Expr::Var(sym) => {
                 let env_ref = env.borrow();
-                env_ref.vars.get(sym)
+                env_ref
+                    .vars
+                    .get(sym)
                     .cloned()
-                    .or_else(|| {
-                        env_ref.builtins.get(sym).map(|b| Const::Builtin(b.clone()))
-                    })
-                    .ok_or_else(|| {
-                        CheckError::VariableNotFound {
-                            name: sym.clone(),
-                            expr: self.clone(),
-                        }
+                    .or_else(|| env_ref.builtins.get(sym).map(|b| Const::Builtin(b.clone())))
+                    .ok_or_else(|| CheckError::VariableNotFound {
+                        name: sym.clone(),
+                        expr: self.clone(),
                     })
             }
             Expr::Lam(params, body) => {
@@ -553,7 +555,12 @@ impl Expr {
                 }
                 apply_function(func, args)
             }
-            Expr::Let { var, ty: _ty, val, body } => {
+            Expr::Let {
+                var,
+                ty: _ty,
+                val,
+                body,
+            } => {
                 let val_evaluated = val.eval(env.clone())?;
                 let bindings = match_pattern(var, &val_evaluated)?;
                 let mut new_env = env.borrow().clone();
@@ -570,7 +577,11 @@ impl Expr {
             }
             Expr::Variant(typ, variant_name, inner_expr) => {
                 let inner_val = inner_expr.eval(env)?;
-                Ok(Const::Variant(typ.clone(), variant_name.clone(), Box::new(inner_val)))
+                Ok(Const::Variant(
+                    typ.clone(),
+                    variant_name.clone(),
+                    Box::new(inner_val),
+                ))
             }
             Expr::Builtin(builtin) => Ok(Const::Builtin(builtin.clone())),
             Expr::Macro(_m) => Err(CheckError::UnexpandedMacro(self.clone())),
@@ -614,7 +625,10 @@ fn apply_function(func: Const, args: Vec<Const>) -> Result<Const, CheckError> {
                 return Err(CheckError::WrongNumberOfArguments {
                     expected: params.len(),
                     found: args.len(),
-                    expr: Expr::App(Box::new(func.into()), args.into_iter().map(|a| Expr::Const(a)).collect()),
+                    expr: Expr::App(
+                        Box::new(func.into()),
+                        args.into_iter().map(|a| Expr::Const(a)).collect(),
+                    ),
                 });
             }
             let mut new_env_map = closure_env.borrow().vars.clone();
@@ -674,10 +688,7 @@ mod tests {
         // Represent the expression: add(2, 3)
         let expr = Expr::App(
             Box::new(Expr::Builtin(add_builtin)),
-            vec![
-                Expr::Const(Const::Int(2)),
-                Expr::Const(Const::Int(3)),
-            ],
+            vec![Expr::Const(Const::Int(2)), Expr::Const(Const::Int(3))],
         );
 
         let result = expr.eval(env).unwrap();
@@ -738,7 +749,7 @@ mod tests {
             _ => panic!("Expected integer result from record destructuring"),
         }
     }
-    
+
     /// Test let–binding using a variant pattern.
     #[test]
     fn test_let_variant_pattern() {
@@ -807,7 +818,10 @@ mod tests {
             Ok(val) => println!("Unexpected success: {}", val),
             Err(e) => println!("Expected error: {}", e),
         }
-        assert!(result.is_err(), "Expected pattern match to fail due to missing field");
+        assert!(
+            result.is_err(),
+            "Expected pattern match to fail due to missing field"
+        );
     }
 
     /// Test a match expression on a variant (Option–like type)
@@ -835,7 +849,10 @@ mod tests {
                     Box::new(Expr::Var("x".to_string())),
                 ),
                 (
-                    Pattern::Variant("None".to_string(), Box::new(Pattern::Var("default".to_string()))),
+                    Pattern::Variant(
+                        "None".to_string(),
+                        Box::new(Pattern::Var("default".to_string())),
+                    ),
                     Box::new(Expr::Const(Const::Int(0))),
                 ),
             ],
@@ -878,7 +895,10 @@ mod tests {
                     Box::new(Expr::Var("x".to_string())),
                 ),
                 (
-                    Pattern::Variant("None".to_string(), Box::new(Pattern::Var("default".to_string()))),
+                    Pattern::Variant(
+                        "None".to_string(),
+                        Box::new(Pattern::Var("default".to_string())),
+                    ),
                     Box::new(Expr::Const(Const::Int(0))),
                 ),
             ],
