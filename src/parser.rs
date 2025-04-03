@@ -5,8 +5,8 @@ use nom::{
     character::complete::{char, digit1, hex_digit1, multispace1, oct_digit1},
     combinator::{all_consuming, cut, map, map_opt, opt, recognize, verify},
     error::{ContextError, ParseError},
-    multi::{fold_many0, many0, many0_count, many1, separated_list0},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    multi::{fold_many0, many0_count, separated_list0},
+    sequence::{delimited, pair, preceded, separated_pair},
     IResult, Parser,
 };
 use nom::{
@@ -265,11 +265,11 @@ where
 
 /// Parse a string. Use a loop of parse_fragment and push all of the fragments
 /// into an output string.
-fn parse_string<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+fn parse_string<'a, E>(
     input: &'a str,
 ) -> IResult<&'a str, String, E>
 where
-    E: ParseError<&'a str> + FromExternalError<&'a str, std::num::ParseIntError>,
+    E: ParseError<&'a str> + ContextError<&'a str> + ParseError<&'a str> + FromExternalError<&'a str, std::num::ParseIntError>,
 {
     // fold is the equivalent of iterator::fold. It runs a parser in a loop,
     // and for each output value, calls a folding function on each output value.
@@ -581,6 +581,7 @@ fn parse_const<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Const, E> {
     alt((
+        value(Const::Void, parse_unit_literal),
         parse_const_parenthesized,
         map(parse_float_literal, Const::Float),
         map(parse_int_literal, Const::Int),
@@ -680,8 +681,26 @@ fn parse_expr<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         parse_expr_parenthesized,
         parse_expr_record,
         parse_expr_variant,
+        parse_expr_list,
         map(parse_symbol, Expr::var),
     ))(input)
+}
+
+pub fn parse(input: &str) -> Result<Expr, String> {
+    match all_consuming(parse_expr::<VerboseError<&str>>)(input) {
+        Ok((_, expr)) => Ok(expr),
+        Err(e) => {
+            // Convert the error to a string
+            let err_str = match e {
+                nom::Err::Error(e) | nom::Err::Failure(e) => {
+                    convert_error(input, e)
+                }
+                nom::Err::Incomplete(_) => "Incomplete input".to_string(),
+            };
+            Err(err_str)
+        }
+
+    }
 }
 
 #[cfg(test)]

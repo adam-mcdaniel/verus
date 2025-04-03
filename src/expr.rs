@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -448,7 +448,7 @@ pub struct CheckEnv {
 }
 
 /// Environment for evaluation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct EvalEnv {
     pub vars: HashMap<Symbol, Const>,
     pub builtins: HashMap<Symbol, Builtin>,
@@ -456,10 +456,7 @@ pub struct EvalEnv {
 
 impl EvalEnv {
     pub fn new() -> Self {
-        EvalEnv {
-            vars: HashMap::new(),
-            builtins: HashMap::new(),
-        }
+        Self::default()
     }
 }
 
@@ -627,12 +624,12 @@ fn apply_function(func: Const, args: Vec<Const>) -> Result<Const, CheckError> {
                     found: args.len(),
                     expr: Expr::App(
                         Box::new(func.into()),
-                        args.into_iter().map(|a| Expr::Const(a)).collect(),
+                        args.into_iter().map(Expr::Const).collect(),
                     ),
                 });
             }
             let mut new_env_map = closure_env.borrow().vars.clone();
-            for ((param_name, _param_ty), arg) in params.into_iter().zip(args.into_iter()) {
+            for ((param_name, _param_ty), arg) in params.iter().zip(args.into_iter()) {
                 new_env_map.insert(param_name.clone(), arg);
             }
             let new_env = Rc::new(RefCell::new(EvalEnv {
@@ -652,20 +649,21 @@ impl From<Const> for Expr {
     }
 }
 
-/// Example of a builtin function: addition.
-fn builtin_add(args: Vec<Const>) -> Result<Const, CheckError> {
-    if args.len() != 2 {
-        return Err(CheckError::custom(anyhow!("add expects two arguments")));
-    }
-    match (&args[0], &args[1]) {
-        (Const::Int(a), Const::Int(b)) => Ok(Const::Int(a + b)),
-        _ => Err(CheckError::custom(anyhow!("add expects integer arguments"))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+
+    /// Example of a builtin function: addition.
+    fn builtin_add(args: Vec<Const>) -> Result<Const, CheckError> {
+        if args.len() != 2 {
+            return Err(CheckError::custom(anyhow!("add expects two arguments")));
+        }
+        match (&args[0], &args[1]) {
+            (Const::Int(a), Const::Int(b)) => Ok(Const::Int(a + b)),
+            _ => Err(CheckError::custom(anyhow!("add expects integer arguments"))),
+        }
+    }
 
     #[test]
     fn test_add_builtin() {
