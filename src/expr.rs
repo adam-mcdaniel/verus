@@ -261,6 +261,27 @@ pub enum Pattern {
     Const(Const),
 }
 
+impl Pattern {
+    pub fn var(name: impl ToString) -> Self {
+        Pattern::Var(name.to_string())
+    }
+
+    pub fn record(fields: BTreeMap<Symbol, Symbol>) -> Self {
+        Pattern::Record(fields)
+    }
+
+    pub fn variant(name: impl ToString, inner: Pattern) -> Self {
+        Pattern::Variant(name.to_string(), Box::new(inner))
+    }
+
+    pub fn list(head: Pattern, tail: Pattern) -> Self {
+        Pattern::List {
+            head: Box::new(head),
+            tail: Box::new(tail),
+        }
+    }
+}
+
 impl Display for Pattern {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         use Pattern::*;
@@ -370,7 +391,7 @@ pub enum Expr {
     /// Let–binding: let pattern : Type = val in body
     Let {
         var: Pattern,
-        ty: Type,
+        ty: Option<Type>,
         val: Box<Expr>,
         body: Box<Expr>,
     },
@@ -401,11 +422,40 @@ impl Expr {
         Expr::Var(name.to_string())
     }
 
+    pub fn let_var(
+        var: Pattern,
+        ty: Option<Type>,
+        val: impl Into<Expr>,
+        body: impl Into<Expr>,
+    ) -> Expr {
+        Expr::Let {
+            var,
+            ty,
+            val: Box::new(val.into()),
+            body: Box::new(body.into()),
+        }
+    }
+
     /// Strip annotations recursively.
     pub fn strip_annotations(&self) -> &Self {
         match self {
             Self::Annotated(_, expr) => expr.strip_annotations(),
             _ => self,
+        }
+    }
+
+    pub fn list(exprs: impl IntoIterator<Item = Expr>) -> Expr {
+        let exprs_vec: Vec<Expr> = exprs.into_iter().collect();
+        Expr::List(exprs_vec)
+    }
+
+    pub fn many(exprs: impl IntoIterator<Item = Expr>) -> Expr {
+        let exprs_vec: Vec<Expr> = exprs.into_iter().collect();
+        if exprs_vec.is_empty() {
+            // Return void if no expressions are provided.
+            Expr::Const(Const::Void)
+        } else {
+            Expr::Many(exprs_vec)
         }
     }
 }
@@ -714,12 +764,12 @@ mod tests {
                 map.insert("y".to_string(), "b".to_string());
                 map
             }),
-            ty: Type::Record({
+            ty: Some(Type::Record({
                 let mut map = BTreeMap::new();
                 map.insert("x".to_string(), Box::new(Type::Int));
                 map.insert("y".to_string(), Box::new(Type::Int));
                 map
-            }),
+            })),
             val: Box::new(Expr::Record({
                 let mut map = BTreeMap::new();
                 map.insert("x".to_string(), Expr::Const(Const::Int(1)));
@@ -760,7 +810,7 @@ mod tests {
         // let Some(x) : Option = Some(42) in x
         let let_expr = Expr::Let {
             var: Pattern::Variant("Some".to_string(), Box::new(Pattern::Var("x".to_string()))),
-            ty: option_type.clone(),
+            ty: Some(option_type.clone()),
             val: Box::new(Expr::Variant(
                 option_type,
                 "Some".to_string(),
@@ -791,12 +841,12 @@ mod tests {
                 map.insert("y".to_string(), "b".to_string());
                 map
             }),
-            ty: Type::Record({
+            ty: Some(Type::Record({
                 let mut map = BTreeMap::new();
                 map.insert("x".to_string(), Box::new(Type::Int));
                 map.insert("y".to_string(), Box::new(Type::Int));
                 map
-            }),
+            })),
             // The record value only provides "x".
             val: Box::new(Expr::Record({
                 let mut map = BTreeMap::new();
