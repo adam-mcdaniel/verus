@@ -5,8 +5,8 @@ use nom::{
     character::complete::{char, digit1, hex_digit1, multispace1, oct_digit1},
     combinator::{all_consuming, cut, map, map_opt, opt, recognize, verify},
     error::{ContextError, ParseError},
-    multi::{fold_many0, many0_count, separated_list0},
-    sequence::{delimited, pair, preceded, separated_pair},
+    multi::{fold_many0, many0, many0_count, separated_list0, separated_list1},
+    sequence::{delimited, pair, preceded, separated_pair, terminated},
     IResult, Parser,
 };
 use nom::{
@@ -394,14 +394,14 @@ fn parse_type_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("{")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, fields) = cut(separated_list0(
+    let (input, fields) = separated_list1(
         delimited(whitespace, char(','), whitespace),
         separated_pair(
             parse_symbol,
             delimited(whitespace, char(':'), whitespace),
             parse_type,
         ),
-    ))(input)?;
+    )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
@@ -424,7 +424,7 @@ fn parse_type_enum<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("{")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, fields) = separated_list0(
+    let (input, fields) = separated_list1(
         delimited(whitespace, tag("|"), whitespace),
         alt((
             separated_pair(parse_symbol, whitespace, parse_type),
@@ -507,14 +507,14 @@ fn parse_const_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("{")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, fields) = cut(separated_list0(
+    let (input, fields) = separated_list1(
         delimited(whitespace, char(','), whitespace),
         separated_pair(
             parse_symbol,
             delimited(whitespace, char(':'), whitespace),
             parse_const,
         ),
-    ))(input)?;
+    )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
@@ -603,14 +603,14 @@ fn parse_expr_record<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("{")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, fields) = cut(separated_list0(
+    let (input, fields) = separated_list1(
         delimited(whitespace, char(','), whitespace),
         separated_pair(
             parse_symbol,
             delimited(whitespace, char(':'), whitespace),
             parse_expr,
         ),
-    ))(input)?;
+    )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
@@ -674,21 +674,157 @@ fn parse_expr_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((input, Expr::List(elements)))
 }
 
+fn parse_pattern<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Pattern, E> {
+    // For now, just parse a symbol as a pattern
+    map(parse_symbol, Pattern::var)(input)
+}
+
+fn parse_expr_let<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("let")(input)?;
+
+    // Parse comma separated let bindings
+    let (input, bindings) = separated_list1(
+        delimited(whitespace, char(','), whitespace),
+        parse_expr_let_binding::<E>,
+    )(input)?;
+
+    // Parse an optional `in` keyword
+    let (input, result) = opt(preceded(
+        whitespace,
+        preceded(tag("in"), preceded(whitespace, parse_expr)),
+    ))(input)?;
+
+    let mut let_expr = None;
+    for binding in bindings.into_iter().rev() {
+        let (pattern, ty, expr) = binding;
+
+        // Build the let expression
+        let_expr = match let_expr {
+            Some(e) => Some(Expr::let_var(pattern, ty, expr, e)),
+            None => Some(Expr::let_var(
+                pattern,
+                ty,
+                expr,
+                result.clone().unwrap_or(Expr::VOID),
+            )),
+        };
+    }
+
+    // If `let_expr` is None, it means there were no bindings, just return the original expression
+    Ok((
+        input,
+        let_expr.unwrap_or(
+            // Fallback to the original expression if no bindings were provided
+            // This should not happen in a well-formed let expression
+            Expr::VOID,
+        ),
+    ))
+}
+
+fn parse_expr_let_binding<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, (Pattern, Option<Type>, Expr), E> {
+    let (input, _) = whitespace(input)?;
+    // Parse a pattern
+    let (input, pattern) = parse_pattern(input)?;
+
+    // Parse an optional `:` type annotation for the pattern
+    let (input, ty) = opt(preceded(
+        delimited(whitespace, tag(":"), whitespace),
+        parse_type,
+    ))(input)?;
+
+    // Parse an equals sign
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("=")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the expression
+    let (input, expr) = cut(parse_expr)(input)?;
+
+    let (input, _) = whitespace(input)?;
+
+    Ok((input, (pattern, ty, expr)))
+}
+
+fn parse_expr_typedef<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    // Parse a type definition
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("type")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, name) = parse_symbol(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("=")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, ty) = parse_type(input)?;
+
+    Ok((input, Expr::Type(name.to_owned(), ty)))
+}
+
+fn parse_stmt<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    // For now, just parse expressions as statements
+    terminated(
+        parse_expr,
+        delimited(
+            // Ensure we consume any trailing whitespace or semicolon
+            whitespace,
+            opt(char(';')),
+            whitespace,
+        ),
+    )(input)
+}
+
+fn parse_stmt_suite<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    // Parse a sequence of statements
+    let (input, exprs) = many0(parse_stmt)(input)?;
+    // Return the last expression in the suite
+    Ok((input, Expr::many(exprs)))
+}
+
+fn parse_expr_block<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("{")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse a suite of statements
+    let (input, expr) = parse_stmt_suite::<E>(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("}")(input)?;
+    Ok((
+        input, expr, // Return the last expression in the block
+    ))
+}
+
 fn parse_expr<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
     alt((
         map(parse_const, Expr::Const),
         parse_expr_parenthesized,
+        parse_expr_block,
         parse_expr_record,
         parse_expr_variant,
         parse_expr_list,
+        parse_expr_let,
+        parse_expr_typedef,
+        // Allow blocks as expressions
         map(parse_symbol, Expr::var),
     ))(input)
 }
 
 pub fn parse(input: &str) -> Result<Expr, String> {
-    match all_consuming(parse_expr::<VerboseError<&str>>)(input) {
+    match all_consuming(parse_stmt::<VerboseError<&str>>)(input) {
         Ok((_, expr)) => Ok(expr),
         Err(e) => {
             // Convert the error to a string
@@ -858,5 +994,148 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_expr_let() {
+        let input_and_expected = [
+            (
+                "let x = 5 in [x]",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    None,
+                    Const::Int(5),
+                    Expr::list([Expr::var("x")]),
+                ),
+            ),
+            (
+                "let x: Int = 5 in [x]",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    Some(Type::Int), // Explicit type annotation
+                    Const::Int(5),
+                    Expr::list([Expr::var("x")]),
+                ),
+            ),
+            (
+                "let x = 5",
+                Expr::let_var(Pattern::var("x"), None, Const::Int(5), Expr::VOID),
+            ),
+            (
+                "let x: Int = 5",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    Some(Type::Int), // Explicit type annotation
+                    Const::Int(5),
+                    Expr::VOID,
+                ),
+            ),
+            (
+                "let x = 5, y = 6 in [x, y]",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    None,
+                    Const::Int(5),
+                    Expr::let_var(
+                        Pattern::var("y"),
+                        None,
+                        Const::Int(6),
+                        Expr::list([
+                            Expr::var("x"), // Use x from the outer let
+                            Expr::var("y"), // Use y from the inner let
+                        ]),
+                    ),
+                ),
+            ),
+        ];
+
+        for (input, expected) in input_and_expected {
+            let result = parse_expr_let::<VerboseError<&str>>(input);
+            println!("{input:?} -> {result:?}");
+            if let Err(e) = result {
+                // Print the error for debugging
+                let err_str = match e {
+                    nom::Err::Error(e) | nom::Err::Failure(e) => convert_error(input, e),
+                    nom::Err::Incomplete(_) => "Incomplete input".to_string(),
+                };
+                panic!("Failed to parse '{input}': {err_str}");
+            }
+            assert_eq!(result, Ok(("", expected.clone())));
+        }
+    }
+
+    #[test]
+    fn test_parse_stmt() {
+        let input_and_expected = [
+            ("1;", Expr::Const(Const::Int(1))),
+            ("{}", Expr::VOID),
+            (
+                "let x = 5 in [x];",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    None,
+                    Const::Int(5),
+                    Expr::list([Expr::var("x")]),
+                ),
+            ),
+            (
+                "let x: Int = 5 in [x];",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    Some(Type::Int),
+                    Const::Int(5),
+                    Expr::list([Expr::var("x")]),
+                ),
+            ),
+            (
+                "let x = 5 in {}",
+                Expr::let_var(
+                    Pattern::var("x"),
+                    None,
+                    Const::Int(5),
+                    Expr::VOID, // Empty block
+                ),
+            ),
+            (
+                "{
+                    let x = 5;
+                    let y = 10 in [x, y];
+                }",
+                Expr::many([
+                    Expr::let_var(Pattern::var("x"), None, Const::Int(5), Expr::VOID),
+                    Expr::let_var(
+                        Pattern::var("y"),
+                        None,
+                        Const::Int(10),
+                        Expr::list([Expr::var("x"), Expr::var("y")]),
+                    ),
+                ]),
+            ),
+            (
+                "{
+                    let x = 5;
+                    let y = 10 in [x, y];
+                }",
+                Expr::many([
+                    Expr::let_var(Pattern::var("x"), None, Const::Int(5), Expr::VOID),
+                    Expr::let_var(
+                        Pattern::var("y"),
+                        None,
+                        Const::Int(10),
+                        Expr::list([Expr::var("x"), Expr::var("y")]),
+                    ),
+                ]),
+            ),
+            (
+                "type MyType = Int;",
+                Expr::Type("MyType".to_owned(), Type::Int),
+            ),
+        ];
+
+        for (input, expected) in input_and_expected {
+            let result = parse_stmt::<VerboseError<&str>>(input);
+            println!("{input:?} -> {result:?}");
+            assert_eq!(result, Ok(("", expected.clone())));
+        }
     }
 }
