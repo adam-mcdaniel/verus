@@ -1,20 +1,21 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct SourceCodeLocation {
     line: usize,
     column: usize,
     length: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum Metadata {
     Many(Vec<Self>),
     Description(String),
@@ -139,6 +140,15 @@ pub enum CheckError {
 
     #[error("Non-exhaustive match in {0}")]
     NonExhaustiveMatch(Expr),
+
+    #[error("Ambiguous type in {0} (found {1})")]
+    AmbiguousType(Expr, Type),
+}
+
+impl From<anyhow::Error> for CheckError {
+    fn from(err: anyhow::Error) -> Self {
+        CheckError::Custom(Arc::new(err))
+    }
 }
 
 impl CheckError {
@@ -151,7 +161,7 @@ impl CheckError {
 pub type Symbol = String;
 
 /// Our type system supports algebraic data types (enums and records) as well as some primitives.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialOrd, Ord, Eq, Hash)]
 pub enum Type {
     /// A sum type where each variant has an associated type.
     Enum(BTreeMap<Symbol, Box<Type>>),
@@ -162,9 +172,20 @@ pub enum Type {
     Str,
     Char,
     Bool,
+    /// A signed integer type.
     Int,
+    /// A floating–point type.
     Float,
+    /// A number type that can be either an integer or a float.
+    Number,
+    /// A type that represents no value.
     Void,
+    /// A type that matches anything.
+    /// Reserved for builtin and internal use.
+    Any,
+    /// A type that matches one of several types.
+    /// Reserved for builtin and internal use.
+    OneOf(BTreeSet<Type>),
 
     Function {
         arg_types: Vec<Type>,
@@ -177,6 +198,144 @@ pub enum Type {
 impl Type {
     pub fn name(name: impl ToString) -> Self {
         Type::Name(name.to_string())
+    }
+
+    pub fn list(ty: Type) -> Self {
+        Type::List(Box::new(ty))
+    }
+
+    pub fn one_of(tys: impl IntoIterator<Item = Type>) -> Self {
+        let tys_vec: BTreeSet<Type> = tys.into_iter().collect();
+        Type::OneOf(tys_vec)
+    }
+
+    pub fn number() -> Self {
+        // Type::one_of([Type::Int, Type::Float])
+        Type::Number
+    }
+
+    pub fn is_ambiguous(&self) -> bool {
+        match self {
+            Type::Any => true,
+            Type::OneOf(tys) => tys.len() > 1,
+            Type::List(ty) => ty.is_ambiguous(),
+            Type::Record(fields) => fields.values().any(|ty| ty.is_ambiguous()),
+            Type::Enum(fields) => fields.values().any(|ty| ty.is_ambiguous()),
+            _ => false,
+        }
+    }
+
+    pub fn can_cast_to(&self, other: &Type) -> bool {
+        if self == other {
+            return true;
+        }
+        match (self, other) {
+            (Type::Any, _) => true,
+            (_, Type::Any) => true,
+            (Type::OneOf(tys), _) => tys.contains(other),
+            (_, Type::OneOf(tys)) => tys.contains(self),
+            (Type::List(a), Type::List(b)) => a.can_cast_to(b),
+            (
+                Type::Function {
+                    arg_types: a_arg_types,
+                    return_type: a_return_type,
+                },
+                Type::Function {
+                    arg_types: b_arg_types,
+                    return_type: b_return_type,
+                },
+            ) => {
+                if a_arg_types.len() != b_arg_types.len() {
+                    return false;
+                }
+                for (a, b) in a_arg_types.iter().zip(b_arg_types.iter()) {
+                    if !a.can_cast_to(b) {
+                        return false;
+                    }
+                }
+                a_return_type.can_cast_to(b_return_type)
+            }
+            (Type::Record(a), Type::Record(b)) => {
+                for (name, ty) in a {
+                    if let Some(other_ty) = b.get(name) {
+                        if !ty.can_cast_to(other_ty) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Type::Int, Type::Float) => true,
+            (Type::Float, Type::Int) => true,
+            (Type::Str, Type::Char) => true,
+            (Type::Char, Type::Str) => true,
+
+            (Type::Bool, Type::Int) => true,
+            (Type::Int, Type::Bool) => true,
+
+            (Type::Int, Type::Number) => true,
+            (Type::Float, Type::Number) => true,
+            (Type::Number, Type::Int) => true,
+            (Type::Number, Type::Float) => true,
+            _ => false,
+        }
+    }
+
+    pub fn can_be_used_as(&self, other: &Type) -> bool {
+        if self == other {
+            return true;
+        }
+        match (self, other) {
+            (Type::Any, _) => true,
+            (_, Type::Any) => true,
+            (Type::OneOf(tys), _) => tys.contains(other),
+            (_, Type::OneOf(tys)) => tys.contains(self),
+            (Type::List(a), Type::List(b)) => a.can_be_used_as(b),
+            (
+                Type::Function {
+                    arg_types: a_arg_types,
+                    return_type: a_return_type,
+                },
+                Type::Function {
+                    arg_types: b_arg_types,
+                    return_type: b_return_type,
+                },
+            ) => {
+                if a_arg_types.len() != b_arg_types.len() {
+                    return false;
+                }
+                for (a, b) in a_arg_types.iter().zip(b_arg_types.iter()) {
+                    if !a.can_be_used_as(b) {
+                        return false;
+                    }
+                }
+                a_return_type.can_be_used_as(b_return_type)
+            }
+            (Type::Record(a), Type::Record(b)) => {
+                for (name, ty) in a {
+                    if let Some(other_ty) = b.get(name) {
+                        if !ty.can_be_used_as(other_ty) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Type::Int, Type::Number) => true,
+            (Type::Float, Type::Number) => true,
+            (Type::Number, Type::Int) => true,
+            (Type::Number, Type::Float) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_function(&self) -> bool {
+        matches!(self, Type::Function { .. })
+            || matches!(self, Type::OneOf(tys) if tys.iter().any(|t| t.is_function()))
     }
 
     pub fn record(fields: impl IntoIterator<Item = (Symbol, Type)>) -> Self {
@@ -200,6 +359,20 @@ impl Type {
             arg_types: arg_types.into_iter().collect(),
             return_type: Box::new(return_type),
         }
+    }
+}
+
+impl FromStr for Type {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        crate::parse_type(s)
+    }
+}
+
+impl From<&str> for Type {
+    fn from(s: &str) -> Self {
+        s.parse().unwrap()
     }
 }
 
@@ -227,12 +400,24 @@ impl Display for Type {
                 }
                 write!(f, "}}")
             }
+            Any => write!(f, "Any"),
+            OneOf(tys) => {
+                write!(f, "OneOf(")?;
+                for (i, ty) in tys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty)?;
+                }
+                write!(f, ")")
+            }
             List(ty) => write!(f, "[{}]", ty),
-            Str => write!(f, "String"),
+            Str => write!(f, "Str"),
             Char => write!(f, "Char"),
             Bool => write!(f, "Bool"),
             Int => write!(f, "Int"),
             Float => write!(f, "Float"),
+            Number => write!(f, "Num"),
             Void => write!(f, "Void"),
             Function {
                 arg_types,
@@ -252,8 +437,43 @@ impl Display for Type {
     }
 }
 
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        use Type::*;
+        match (self, other) {
+            (Any, _) => true,
+            (_, Any) => true,
+            (Enum(a), Enum(b)) => a == b,
+            (Record(a), Record(b)) => a == b,
+            (List(a), List(b)) => a == b,
+            (Str, Str) => true,
+            (Char, Char) => true,
+            (Bool, Bool) => true,
+            (Int, Int) => true,
+            (Float, Float) => true,
+            (Void, Void) => true,
+            (Number, Number) => true,
+            (
+                Function {
+                    arg_types: a_arg_types,
+                    return_type: a_return_type,
+                },
+                Function {
+                    arg_types: b_arg_types,
+                    return_type: b_return_type,
+                },
+            ) => a_arg_types == b_arg_types && a_return_type == b_return_type,
+            (OneOf(a), OneOf(b)) => a == b,
+            (OneOf(a), b) => a.contains(b),
+            (a, OneOf(b)) => b.contains(a),
+            (Name(a), Name(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// A built–in function that can be called from our STLC expressions.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq)]
 pub struct Builtin {
     pub name: Symbol,
     pub help_short: String,
@@ -266,6 +486,7 @@ pub struct Builtin {
 impl Builtin {
     pub fn new(
         name: impl ToString,
+        ty: impl Into<Type>,
         help_short: impl ToString,
         help_long: impl ToString,
         exec: fn(args: Vec<Const>) -> Result<Const, CheckError>,
@@ -274,24 +495,18 @@ impl Builtin {
             name: name.to_string(),
             help_short: help_short.to_string(),
             help_long: help_long.to_string(),
-            ty: Type::Function {
-                arg_types: vec![Type::Int, Type::Int],
-                return_type: Box::new(Type::Int),
-            },
+            ty: ty.into(),
             exec,
         }
     }
 
     pub fn get_type(&self) -> Type {
-        Type::Function {
-            arg_types: vec![Type::Int, Type::Int],
-            return_type: Box::new(Type::Int),
-        }
+        self.ty.clone()
     }
 }
 
 /// A macro that transforms an expression before type–checking. (The implementation here is just a placeholder.)
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Macro {
     pub name: Symbol,
     pub help_short: String,
@@ -300,7 +515,7 @@ pub struct Macro {
 }
 
 /// Patterns for use in let–bindings or match expressions.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Pattern {
     /// A variable pattern that binds the matched value.
     Var(Symbol),
@@ -338,6 +553,18 @@ impl Pattern {
     }
 }
 
+impl From<&str> for Pattern {
+    fn from(s: &str) -> Self {
+        Pattern::Var(s.to_string())
+    }
+}
+
+impl From<String> for Pattern {
+    fn from(s: String) -> Self {
+        Pattern::Var(s)
+    }
+}
+
 impl Display for Pattern {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         use Pattern::*;
@@ -361,7 +588,7 @@ impl Display for Pattern {
 }
 
 /// Constant values in our language. We now include closures and builtins as constants.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Const {
     List(Vec<Const>),
     Int(i64),
@@ -394,7 +621,6 @@ impl Const {
 
     pub fn get_type(&self) -> Type {
         match self {
-            Const::List(_) => Type::List(Box::new(Type::Void)),
             Const::Int(_) => Type::Int,
             Const::Float(_) => Type::Float,
             Const::Str(_) => Type::Str,
@@ -407,10 +633,132 @@ impl Const {
                 }
                 Type::Record(fields)
             }
+            Const::List(elems) => {
+                let mut elem_ty: Option<Type> = None;
+                for elem in elems {
+                    let ty = elem.get_type();
+                    if let Some(existing) = &elem_ty {
+                        if !ty.can_be_used_as(&existing) {
+                            elem_ty = Some(Type::Any);
+                        }
+                    } else {
+                        elem_ty = Some(ty);
+                    }
+                }
+                Type::List(Box::new(elem_ty.unwrap_or(Type::Any)))
+            }
             Const::Variant(typ, _, _) => typ.clone(),
             Const::Void => Type::Void,
             Const::Closure(_, _, _) => Type::Void,
-            Const::Builtin(b) => b.get_type()
+            Const::Builtin(b) => b.get_type(),
+        }
+    }
+}
+
+impl From<bool> for Const {
+    fn from(b: bool) -> Self {
+        Const::Bool(b)
+    }
+}
+
+impl From<i64> for Const {
+    fn from(i: i64) -> Self {
+        Const::Int(i)
+    }
+}
+
+impl From<f64> for Const {
+    fn from(f: f64) -> Self {
+        Const::Float(f)
+    }
+}
+
+impl From<String> for Const {
+    fn from(s: String) -> Self {
+        Const::Str(s)
+    }
+}
+
+impl From<char> for Const {
+    fn from(c: char) -> Self {
+        Const::Char(c)
+    }
+}
+
+impl From<Vec<Const>> for Const {
+    fn from(list: Vec<Const>) -> Self {
+        Const::List(list)
+    }
+}
+
+impl From<BTreeMap<Symbol, Const>> for Const {
+    fn from(map: BTreeMap<Symbol, Const>) -> Self {
+        Const::Record(map)
+    }
+}
+
+impl From<i32> for Const {
+    fn from(i: i32) -> Self {
+        Const::Int(i as i64)
+    }
+}
+
+impl From<Builtin> for Const {
+    fn from(b: Builtin) -> Self {
+        Const::Builtin(b)
+    }
+}
+
+impl PartialEq for Const {
+    fn eq(&self, other: &Self) -> bool {
+        use Const::*;
+        match (self, other) {
+            (Int(a), Int(b)) => a == b,
+            (Float(a), Float(b)) => a == b,
+            (Int(a), Float(b)) => (*a as f64) == *b,
+            (Float(a), Int(b)) => *a == (*b as f64),
+            (Str(a), Str(b)) => a == b,
+            (Char(a), Char(b)) => a == b,
+            (Bool(a), Bool(b)) => a == b,
+            (Void, Void) => true,
+            (Record(a), Record(b)) => a == b,
+            (Variant(typ_a, name_a, inner_a), Variant(typ_b, name_b, inner_b)) => {
+                typ_a == typ_b && name_a == name_b && inner_a == inner_b
+            }
+            (Builtin(a), Builtin(b)) => a == b,
+            (Closure(_, _, _), Closure(_, _, _)) => false,
+            (List(a), List(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for Const {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use Const::*;
+
+        match (self, other) {
+            (Int(a), Int(b)) => a.partial_cmp(b),
+            (Float(a), Float(b)) => a.partial_cmp(b),
+            (Int(a), Float(b)) => (*a as f64).partial_cmp(b),
+            (Float(a), Int(b)) => a.partial_cmp(&(*b as f64)),
+
+            (Str(a), Str(b)) => a.partial_cmp(b),
+            (Char(a), Char(b)) => a.partial_cmp(b),
+            (Bool(a), Bool(b)) => a.partial_cmp(b),
+            (Void, Void) => Some(std::cmp::Ordering::Equal),
+            (Record(a), Record(b)) => a.partial_cmp(b),
+            (Variant(typ_a, name_a, inner_a), Variant(typ_b, name_b, inner_b)) => {
+                if typ_a == typ_b && name_a == name_b {
+                    inner_a.partial_cmp(inner_b)
+                } else {
+                    None
+                }
+            }
+            (Builtin(a), Builtin(b)) => a.partial_cmp(b),
+            (Closure(_, _, _), Closure(_, _, _)) => None,
+            (List(a), List(b)) => a.partial_cmp(b),
+            _ => None,
         }
     }
 }
@@ -455,7 +803,7 @@ impl Display for Const {
 }
 
 /// The core expression language.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Expr {
     Annotated(Metadata, Box<Self>),
 
@@ -463,6 +811,9 @@ pub enum Expr {
     Record(BTreeMap<Symbol, Expr>),
     Variant(Type, Symbol, Box<Expr>),
     List(Vec<Expr>),
+
+    /// A type–annotated expression.
+    As(Box<Expr>, Type),
 
     /// A type annotation (ignored at runtime)
     Type(Symbol, Type),
@@ -561,21 +912,24 @@ impl Expr {
             }
             Expr::App(func_expr, args_exprs) => {
                 let func_ty = func_expr.check(env)?;
-                let arg_tys: Vec<_> = args_exprs
+                let found_arg_types: Vec<_> = args_exprs
                     .iter()
                     .map(|arg| arg.check(env))
                     .collect::<Result<_, _>>()?;
                 match func_ty {
-                    Type::Function { arg_types, return_type } => {
-                        if arg_types.len() != arg_tys.len() {
+                    Type::Function {
+                        arg_types: param_types,
+                        return_type,
+                    } => {
+                        if param_types.len() != found_arg_types.len() {
                             return Err(CheckError::WrongNumberOfArguments {
-                                expected: arg_types.len(),
-                                found: arg_tys.len(),
+                                expected: param_types.len(),
+                                found: found_arg_types.len(),
                                 expr: self.clone(),
                             });
                         }
-                        for (expected, found) in arg_types.iter().zip(arg_tys.iter()) {
-                            if expected != found {
+                        for (expected, found) in param_types.iter().zip(found_arg_types.iter()) {
+                            if !found.can_be_used_as(expected) {
                                 return Err(CheckError::MismatchType {
                                     expected: expected.clone(),
                                     found: found.clone(),
@@ -595,15 +949,28 @@ impl Expr {
                     }),
                 }
             }
-            Expr::Let { var, val, body, .. } => {
+            Expr::Let { var, ty, val, body } => {
+                let val_ty = val.check(env)?;
+                if let Some(expected_ty) = ty {
+                    if !val_ty.can_be_used_as(expected_ty) {
+                        return Err(CheckError::MismatchType {
+                            expected: expected_ty.clone(),
+                            found: val_ty,
+                            expr: self.clone(),
+                        });
+                    }
+                } else {
+                    if val_ty.is_ambiguous() {
+                        return Err(CheckError::AmbiguousType(*val.clone(), val_ty.clone()));
+                    }
+                }
+
+                let bindings = match_pattern_types(var, &val_ty)?;
+
                 if **body == Expr::VOID {
-                    let val_ty = val.check(env)?;
-                    let bindings = match_pattern_types(var, &val_ty)?;
                     env.vars.extend(bindings);
                     body.check(env)
                 } else {
-                    let val_ty = val.check(env)?;
-                    let bindings = match_pattern_types(var, &val_ty)?;
                     let mut new_env = env.clone();
                     new_env.vars.extend(bindings);
                     let body_ty = body.check(&mut new_env)?;
@@ -628,7 +995,7 @@ impl Expr {
                 for expr in exprs {
                     let ty = expr.check(env)?;
                     if let Some(existing_ty) = &elem_ty {
-                        if existing_ty != &ty {
+                        if !ty.can_be_used_as(existing_ty) {
                             return Err(CheckError::MismatchType {
                                 expected: existing_ty.clone(),
                                 found: ty,
@@ -639,6 +1006,7 @@ impl Expr {
                         elem_ty = Some(ty);
                     }
                 }
+                println!("elem_ty: {:?}", elem_ty);
                 Ok(Type::List(Box::new(elem_ty.unwrap_or(Type::Void))))
             }
             Expr::Builtin(builtin) => Ok(builtin.get_type()),
@@ -656,7 +1024,7 @@ impl Expr {
                 }
                 let first_arm_ty = arm_tys[0].clone();
                 for ty in &arm_tys[1..] {
-                    if ty != &first_arm_ty {
+                    if !ty.can_be_used_as(&first_arm_ty) {
                         return Err(CheckError::MismatchType {
                             expected: first_arm_ty.clone(),
                             found: ty.clone(),
@@ -696,10 +1064,31 @@ impl Expr {
                 new_env.types.insert(name.clone(), ty.clone());
                 Ok(Type::Name(name.clone()))
             }
-            _ => unimplemented!(),
+            Expr::As(expr, ty) => {
+                let expr_ty = expr.check(env)?;
+                if !expr_ty.can_cast_to(ty) {
+                    return Err(CheckError::MismatchType {
+                        expected: ty.clone(),
+                        found: expr_ty,
+                        expr: self.clone(),
+                    });
+                }
+                Ok(ty.clone())
+            }
         }
     }
+}
 
+impl From<Const> for Expr {
+    fn from(c: Const) -> Self {
+        Expr::Const(c)
+    }
+}
+
+impl From<Builtin> for Expr {
+    fn from(b: Builtin) -> Self {
+        Expr::Builtin(b)
+    }
 }
 
 impl Display for Expr {
@@ -740,6 +1129,7 @@ impl Display for Expr {
                 }
                 write!(f, "}}")
             }
+            Expr::As(expr, ty) => write!(f, "{} as {}", expr, ty),
             Expr::Variant(typ, name, inner_expr) => {
                 write!(f, "{} of {}({})", typ, name, inner_expr)
             }
@@ -783,7 +1173,7 @@ impl Display for Expr {
             }
             Expr::Type(name, ty) => {
                 write!(f, "type {} = {}", name, ty)
-            }            
+            }
         }
     }
 }
@@ -857,9 +1247,19 @@ impl CheckEnv {
                 }
                 Type::Enum(new_variants)
             }
-
+            Type::OneOf(tys) => {
+                let new_tys: Vec<_> = tys.iter().map(|t| self.simplify_type(t)).collect();
+                Type::one_of(new_tys)
+            }
             Type::List(ty) => Type::List(Box::new(self.simplify_type(ty))),
-            Type::Str | Type::Char | Type::Bool | Type::Int | Type::Float | Type::Void => ty.clone(),
+            Type::Any
+            | Type::Str
+            | Type::Char
+            | Type::Bool
+            | Type::Int
+            | Type::Float
+            | Type::Number
+            | Type::Void => ty.clone(),
             Type::Function {
                 arg_types,
                 return_type,
@@ -876,18 +1276,19 @@ impl CheckEnv {
                 // Define a type named `name` with the given type `ty`.
                 self.types.insert(name.clone(), ty.clone());
             }
-            Expr::Let {
-                var,
-                ty,
-                val,
-                body,
-            } => {
+            Expr::Let { var, ty, val, body } => {
                 self.collect_type_definitions(val)?;
                 self.collect_type_definitions(body)?;
             }
+            Expr::As(expr, _ty) => {
+                self.collect_type_definitions(expr)?;
+            }
             Expr::Lam(params, body) => {
                 for (_, param_ty) in params {
-                    self.collect_type_definitions(&Expr::Type(param_ty.to_string(), param_ty.clone()))?;
+                    self.collect_type_definitions(&Expr::Type(
+                        param_ty.to_string(),
+                        param_ty.clone(),
+                    ))?;
                 }
                 self.collect_type_definitions(body)?;
             }
@@ -922,11 +1323,17 @@ impl CheckEnv {
                     match pat {
                         Pattern::Record(fields) => {
                             for (_, var_name) in fields {
-                                self.collect_type_definitions(&Expr::Type(var_name.clone(), Type::Void))?;
+                                self.collect_type_definitions(&Expr::Type(
+                                    var_name.clone(),
+                                    Type::Void,
+                                ))?;
                             }
                         }
                         Pattern::Variant(_, inner_pat) => {
-                            self.collect_type_definitions(&Expr::Type(inner_pat.to_string(), Type::Void))?;
+                            self.collect_type_definitions(&Expr::Type(
+                                inner_pat.to_string(),
+                                Type::Void,
+                            ))?;
                         }
                         _ => {}
                     }
@@ -1015,7 +1422,10 @@ fn match_pattern(pattern: &Pattern, value: &Const) -> Result<HashMap<Symbol, Con
 }
 
 /// Try to match a pattern against a constant value and, if successful, return a binding of variable names to constants.
-fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol, Type>, CheckError> {
+fn match_pattern_types(
+    pattern: &Pattern,
+    value: &Type,
+) -> Result<HashMap<Symbol, Type>, CheckError> {
     let mut bindings = HashMap::new();
     match (pattern, value) {
         (Pattern::Var(sym), v) => {
@@ -1023,7 +1433,7 @@ fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol
             Ok(bindings)
         }
         (Pattern::Const(c), v) => {
-            if c.get_type() == *v {
+            if c.get_type().can_be_used_as(v) {
                 Ok(bindings)
             } else {
                 Err(CheckError::PatternMismatchType(pattern.clone(), v.clone()))
@@ -1031,14 +1441,20 @@ fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol
         }
         (Pattern::Record(pat_map), Type::Record(val_map)) => {
             if pat_map.len() != val_map.len() {
-                return Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()));
+                return Err(CheckError::PatternMismatchType(
+                    pattern.clone(),
+                    value.clone(),
+                ));
             }
 
             for (key, var_name) in pat_map {
                 if let Some(val) = val_map.get(key) {
                     bindings.insert(var_name.clone(), *val.clone());
                 } else {
-                    return Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()));
+                    return Err(CheckError::PatternMismatchType(
+                        pattern.clone(),
+                        value.clone(),
+                    ));
                 }
             }
             Ok(bindings)
@@ -1049,7 +1465,10 @@ fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol
                 bindings.extend(inner_bindings);
                 Ok(bindings)
             } else {
-                Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()))
+                Err(CheckError::PatternMismatchType(
+                    pattern.clone(),
+                    value.clone(),
+                ))
             }
         }
         (Pattern::List { head, tail }, Type::List(list)) => {
@@ -1062,7 +1481,10 @@ fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol
             bindings.extend(tail_bindings);
             Ok(bindings)
         }
-        _ => Err(CheckError::PatternMismatchType(pattern.clone(), value.clone())),
+        _ => Err(CheckError::PatternMismatchType(
+            pattern.clone(),
+            value.clone(),
+        )),
     }
 }
 
@@ -1096,6 +1518,18 @@ impl Expr {
                         expr: self.clone(),
                     })
             }
+            Expr::As(expr, ty) => {
+                let result = expr.eval(env.clone())?;
+                let found_ty = result.get_type();
+                if !found_ty.can_cast_to(ty) {
+                    return Err(CheckError::MismatchType {
+                        expected: ty.clone(),
+                        found: found_ty,
+                        expr: self.clone(),
+                    });
+                }
+                Ok(result)
+            }
             Expr::Lam(params, body) => {
                 // Remove any of the parameters from the environment.
                 let mut env_map = env.borrow().vars.clone();
@@ -1125,15 +1559,14 @@ impl Expr {
                 body,
             } => {
                 let val_evaluated = val.eval(env.clone())?;
+                let bindings = match_pattern(var, &val_evaluated)?;
                 if **body == Expr::VOID {
-                    let bindings = match_pattern(var, &val_evaluated)?;
                     // Create a new environment with the bindings from the pattern match.
                     env.borrow_mut().vars.extend(bindings);
                     // Evaluate the body in the new environment.
                     body.eval(env.clone())
                 } else {
                     let mut new_env = env.borrow().clone();
-                    let bindings = match_pattern(var, &val_evaluated)?;
                     new_env.vars.extend(bindings);
                     let new_env = Rc::new(RefCell::new(new_env));
                     body.eval(new_env)
@@ -1217,12 +1650,6 @@ fn apply_function(func: Const, args: Vec<Const>) -> Result<Const, CheckError> {
         }
         Const::Builtin(builtin) => (builtin.exec)(args),
         _ => Err(CheckError::NotAFunction(func)),
-    }
-}
-
-impl From<Const> for Expr {
-    fn from(c: Const) -> Self {
-        Expr::Const(c)
     }
 }
 

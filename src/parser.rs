@@ -16,7 +16,8 @@ use nom::{
 };
 
 const KEYWORDS: &[&str] = &[
-    "type", "fun", "struct", "enum", "mut", "let", "if", "else", "while", "for", "return", "match",
+    "type", "fun", "struct", "enum", "mut", "let", "if", "in", "then", "else", "while", "for",
+    "return", "match",
 ];
 
 fn is_symbol_char(c: char) -> bool {
@@ -465,8 +466,9 @@ fn parse_type_primitive<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
 ) -> IResult<&'a str, Type, E> {
     let (input, _) = whitespace(input)?;
     let (input, result) = alt((
-        value(Type::Int, tag("Int")),
-        value(Type::Float, tag("Float")),
+        value(Type::Number, tag("Num")),
+        // value(Type::Int, tag("Int")),
+        // value(Type::Float, tag("Float")),
         value(Type::Char, tag("Char")),
         value(Type::Bool, tag("Bool")),
         value(Type::Void, tag("Void")),
@@ -489,7 +491,29 @@ fn parse_type_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((input, t))
 }
 
-fn parse_type<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+pub(super) fn parse_type<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Type, E> {
+    alt((parse_type_function, parse_type_atom))(input)
+}
+
+fn parse_type_function<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Type, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("\\")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, args) =
+        separated_list1(delimited(whitespace, char(','), whitespace), parse_type)(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, ret) = parse_type(input)?;
+
+    Ok((input, Type::function(args, ret)))
+}
+
+fn parse_type_atom<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Type, E> {
     alt((
@@ -531,10 +555,8 @@ fn parse_const_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("[")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, elements) = separated_list0(
-        delimited(whitespace, char(','), whitespace),
-        parse_const,
-    )(input)?;
+    let (input, elements) =
+        separated_list0(delimited(whitespace, char(','), whitespace), parse_const)(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("]")(input)?;
 
@@ -685,22 +707,27 @@ fn parse_pattern_struct<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, fields) = separated_list1(
         delimited(whitespace, char(','), whitespace),
-        alt((separated_pair(
-            parse_symbol,
-            delimited(whitespace, char(':'), whitespace),
-            parse_symbol,
-        ),
-        map(delimited(whitespace, parse_symbol, whitespace), |s| {
-            (s, s)
-        }))),
+        alt((
+            separated_pair(
+                parse_symbol,
+                delimited(whitespace, char(':'), whitespace),
+                parse_symbol,
+            ),
+            map(delimited(whitespace, parse_symbol, whitespace), |s| (s, s)),
+        )),
     )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("}")(input)?;
 
     Ok((
         input,
-        Pattern::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
-    )))
+        Pattern::Record(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        ),
+    ))
 }
 
 fn parse_pattern_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -716,10 +743,13 @@ fn parse_pattern_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, tail) = parse_pattern(input)?;
     let (input, _) = whitespace(input)?;
 
-    Ok((input, Pattern::List {
-        head: Box::new(Pattern::var(head)),
-        tail: Box::new(tail),
-    }))
+    Ok((
+        input,
+        Pattern::List {
+            head: Box::new(Pattern::var(head)),
+            tail: Box::new(tail),
+        },
+    ))
 }
 
 fn parse_pattern_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -862,7 +892,10 @@ fn parse_expr_let_lambda<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             Pattern::Var(name.to_owned()),
             None,
             Expr::Lam(
-                params.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect(),
+                params
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.into()))
+                    .collect(),
                 Box::new(body),
             ),
             Expr::VOID,
@@ -897,22 +930,13 @@ fn parse_expr_lambda<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((
         input,
         Expr::Lam(
-            params.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect(),
+            params
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.into()))
+                .collect(),
             Box::new(body),
         ),
     ))
-}
-
-fn parse_expr_application<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
-    input: &'a str,
-) -> IResult<&'a str, Expr, E> {
-    let (input, _) = whitespace(input)?;
-    let (input, func) = parse_symbol(input)?;
-    let (input, _) = whitespace(input)?;
-    let (input, args) = many1(parse_expr)(input)?;
-    let (input, _) = whitespace(input)?;
-
-    Ok((input, Expr::var(func).app(args)))
 }
 
 fn parse_expr_typedef<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -970,22 +994,222 @@ fn parse_expr_block<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     ))
 }
 
+fn parse_expr_if_else<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("if")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, cond) = parse_expr(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("then")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, then) = parse_expr(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("else")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, else_) = parse_expr_atom(input)?;
+
+    Ok((
+        input,
+        Expr::If(Box::new(cond), Box::new(then), Box::new(else_)),
+    ))
+}
+
+fn parse_expr_if<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("if")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, cond) = parse_expr(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("then")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, then) = parse_expr_atom(input)?;
+
+    Ok((
+        input,
+        Expr::If(Box::new(cond), Box::new(then), Box::new(Expr::VOID)),
+    ))
+}
+
 fn parse_expr<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
     alt((
+        parse_expr_let,
+        parse_expr_let_lambda,
+        parse_expr_typedef,
+        // Allow blocks as expressions
+        parse_expr_lambda,
+        parse_expr_application,
+    ))(input)
+}
+
+fn parse_expr_application<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, func) = parse_expr_cast(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, args) = many0(parse_expr_cast)(input)?;
+    let (input, _) = whitespace(input)?;
+
+    if args.is_empty() {
+        return Ok((input, func));
+    }
+
+    Ok((input, func.app(args)))
+}
+
+fn parse_expr_cast<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, expr) = parse_expr_logical(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, is_cast) = opt(tag("as"))(input)?;
+    let (input, _) = whitespace(input)?;
+    if let Some(_) = is_cast {
+        let (input, ty) = parse_type(input)?;
+        let (input, _) = whitespace(input)?;
+        return Ok((input, Expr::As(Box::new(expr), ty)));
+    } else {
+        return Ok((input, expr));
+    }
+}
+
+fn parse_expr_logical<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    // Parse unary exprs separated by logical operators
+    let (input, head) = parse_expr_comparison(input)?;
+    let (input, tail) = many0(pair(
+        alt((
+            value(crate::libraries::AND.clone(), tag("&&")),
+            value(crate::libraries::OR.clone(), tag("||")),
+        )),
+        preceded(whitespace, parse_expr_comparison),
+    ))(input)?;
+
+    let mut result = head;
+    for (op, e) in tail {
+        result = Expr::from(op).app([result, e]);
+    }
+
+    let (input, _) = whitespace(input)?;
+    Ok((input, result))
+}
+
+fn parse_expr_comparison<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    // Parse unary exprs separated by comparison operators
+    let (input, head) = parse_expr_additive(input)?;
+    let (input, tail) = many0(pair(
+        alt((
+            value(crate::libraries::EQUAL.clone(), tag("==")),
+            value(crate::libraries::NOT_EQUAL.clone(), tag("!=")),
+            value(crate::libraries::LESS_THAN.clone(), tag("<")),
+            value(crate::libraries::LESS_THAN_OR_EQUAL.clone(), tag("<=")),
+            value(crate::libraries::GREATER_THAN.clone(), tag(">")),
+            value(crate::libraries::GREATER_THAN_OR_EQUAL.clone(), tag(">=")),
+        )),
+        preceded(whitespace, parse_expr_additive),
+    ))(input)?;
+
+    let mut result = head;
+    for (op, e) in tail {
+        result = Expr::from(op).app([result, e]);
+    }
+
+    let (input, _) = whitespace(input)?;
+    Ok((input, result))
+}
+
+fn parse_expr_additive<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    // Parse unary exprs separated by additive operators
+    let (input, head) = parse_expr_multiplicative(input)?;
+    let (input, tail) = many0(pair(
+        alt((
+            value(crate::libraries::ADD.clone(), tag("+")),
+            value(crate::libraries::SUBTRACT.clone(), tag("-")),
+        )),
+        preceded(whitespace, parse_expr_multiplicative),
+    ))(input)?;
+
+    let mut result = head;
+    for (op, e) in tail {
+        result = Expr::from(op).app([result, e]);
+    }
+
+    let (input, _) = whitespace(input)?;
+    Ok((input, result))
+}
+
+fn parse_expr_multiplicative<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    // Parse unary exprs separated by multiplicative operators
+    let (input, head) = parse_expr_unary(input)?;
+    let (input, tail) = many0(pair(
+        alt((
+            value(crate::libraries::MULTIPLY.clone(), tag("*")),
+            value(crate::libraries::DIVIDE.clone(), tag("/")),
+            value(crate::libraries::REMAINDER.clone(), tag("%")),
+        )),
+        preceded(whitespace, parse_expr_unary),
+    ))(input)?;
+
+    let mut result = head;
+    for (op, e) in tail {
+        result = Expr::from(op).app([result, e]);
+    }
+
+    let (input, _) = whitespace(input)?;
+    Ok((input, result))
+}
+
+fn parse_expr_unary<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, op) = opt(alt((
+        value(crate::libraries::NOT.clone(), tag("!")),
+        value(crate::libraries::NEGATE.clone(), tag("-")),
+    )))(input)?;
+    let (input, _) = whitespace(input)?;
+    if let Some(op) = op {
+        let (input, e) = cut(parse_expr_unary)(input)?;
+        let (input, _) = whitespace(input)?;
+        return Ok((input, Expr::from(op).app([e])));
+    } else {
+        let (input, e) = parse_expr_atom(input)?;
+        let (input, _) = whitespace(input)?;
+        return Ok((input, e));
+    }
+}
+
+fn parse_expr_atom<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    alt((
+        parse_expr_if_else,
+        parse_expr_if,
         parse_expr_parenthesized,
         map(parse_const, Expr::Const),
         parse_expr_block,
         parse_expr_record,
         parse_expr_variant,
         parse_expr_list,
-        parse_expr_let,
-        parse_expr_let_lambda,
-        parse_expr_typedef,
         // Allow blocks as expressions
-        parse_expr_application,
-        parse_expr_lambda,
         map(parse_symbol, Expr::var),
     ))(input)
 }
@@ -1007,9 +1231,9 @@ pub fn parse(input: &str) -> Result<Expr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
-    use std::cell::RefCell;
 
     #[test]
     fn test_parse_const_record() {
