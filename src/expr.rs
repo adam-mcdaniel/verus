@@ -106,6 +106,9 @@ pub enum CheckError {
     #[error("Pattern structure {0} doesn't match the provided expression {1}")]
     PatternMismatch(Pattern, Const),
 
+    #[error("Pattern type {0} doesn't match the provided type {1}")]
+    PatternMismatchType(Pattern, Type),
+
     #[error("Expected constant expression, but found {0}")]
     InvalidConstant(Expr),
 
@@ -162,6 +165,11 @@ pub enum Type {
     Int,
     Float,
     Void,
+
+    Function {
+        arg_types: Vec<Type>,
+        return_type: Box<Type>,
+    },
     /// A named type.
     Name(Symbol),
 }
@@ -185,6 +193,13 @@ impl Type {
             .map(|(name, ty)| (name, Box::new(ty)))
             .collect();
         Type::Enum(map)
+    }
+
+    pub fn function(arg_types: impl IntoIterator<Item = Type>, return_type: Type) -> Self {
+        Type::Function {
+            arg_types: arg_types.into_iter().collect(),
+            return_type: Box::new(return_type),
+        }
     }
 }
 
@@ -219,6 +234,19 @@ impl Display for Type {
             Int => write!(f, "Int"),
             Float => write!(f, "Float"),
             Void => write!(f, "Void"),
+            Function {
+                arg_types,
+                return_type,
+            } => {
+                write!(f, "(")?;
+                for (i, arg_type) in arg_types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg_type)?;
+                }
+                write!(f, ") -> {}", return_type)
+            }
             Name(name) => write!(f, "{}", name),
         }
     }
@@ -230,8 +258,36 @@ pub struct Builtin {
     pub name: Symbol,
     pub help_short: String,
     pub help_long: String,
+    pub ty: Type,
     // Builtins take a vector of evaluated constant arguments and return a constant result.
     pub exec: fn(args: Vec<Const>) -> Result<Const, CheckError>,
+}
+
+impl Builtin {
+    pub fn new(
+        name: impl ToString,
+        help_short: impl ToString,
+        help_long: impl ToString,
+        exec: fn(args: Vec<Const>) -> Result<Const, CheckError>,
+    ) -> Self {
+        Builtin {
+            name: name.to_string(),
+            help_short: help_short.to_string(),
+            help_long: help_long.to_string(),
+            ty: Type::Function {
+                arg_types: vec![Type::Int, Type::Int],
+                return_type: Box::new(Type::Int),
+            },
+            exec,
+        }
+    }
+
+    pub fn get_type(&self) -> Type {
+        Type::Function {
+            arg_types: vec![Type::Int, Type::Int],
+            return_type: Box::new(Type::Int),
+        }
+    }
 }
 
 /// A macro that transforms an expression before type–checking. (The implementation here is just a placeholder.)
@@ -334,6 +390,28 @@ impl Const {
 
     pub fn variant(typ: Type, name: impl Into<Symbol>, inner: Const) -> Self {
         Const::Variant(typ, name.into(), Box::new(inner))
+    }
+
+    pub fn get_type(&self) -> Type {
+        match self {
+            Const::List(_) => Type::List(Box::new(Type::Void)),
+            Const::Int(_) => Type::Int,
+            Const::Float(_) => Type::Float,
+            Const::Str(_) => Type::Str,
+            Const::Char(_) => Type::Char,
+            Const::Bool(_) => Type::Bool,
+            Const::Record(map) => {
+                let mut fields = BTreeMap::new();
+                for (name, val) in map {
+                    fields.insert(name.clone(), Box::new(val.get_type()));
+                }
+                Type::Record(fields)
+            }
+            Const::Variant(typ, _, _) => typ.clone(),
+            Const::Void => Type::Void,
+            Const::Closure(_, _, _) => Type::Void,
+            Const::Builtin(b) => b.get_type()
+        }
     }
 }
 
@@ -458,6 +536,170 @@ impl Expr {
             Expr::Many(exprs_vec)
         }
     }
+
+    pub fn app(&self, args: impl IntoIterator<Item = Expr>) -> Expr {
+        let args_vec: Vec<Expr> = args.into_iter().collect();
+        Expr::App(Box::new(self.clone()), args_vec)
+    }
+
+    pub fn check(&self, env: &mut CheckEnv) -> Result<Type, CheckError> {
+        match self {
+            Expr::Annotated(_, expr) => expr.check(env),
+            Expr::Const(c) => Ok(c.get_type()),
+            Expr::Var(sym) => env.get_var(sym),
+            Expr::Lam(params, body) => {
+                let mut new_env = env.clone();
+
+                for (name, ty) in params {
+                    new_env.vars.insert(name.clone(), ty.clone());
+                }
+                let body_ty = body.check(&mut new_env)?;
+                Ok(Type::Function {
+                    arg_types: params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    return_type: Box::new(body_ty),
+                })
+            }
+            Expr::App(func_expr, args_exprs) => {
+                let func_ty = func_expr.check(env)?;
+                let arg_tys: Vec<_> = args_exprs
+                    .iter()
+                    .map(|arg| arg.check(env))
+                    .collect::<Result<_, _>>()?;
+                match func_ty {
+                    Type::Function { arg_types, return_type } => {
+                        if arg_types.len() != arg_tys.len() {
+                            return Err(CheckError::WrongNumberOfArguments {
+                                expected: arg_types.len(),
+                                found: arg_tys.len(),
+                                expr: self.clone(),
+                            });
+                        }
+                        for (expected, found) in arg_types.iter().zip(arg_tys.iter()) {
+                            if expected != found {
+                                return Err(CheckError::MismatchType {
+                                    expected: expected.clone(),
+                                    found: found.clone(),
+                                    expr: self.clone(),
+                                });
+                            }
+                        }
+                        Ok(*return_type)
+                    }
+                    _ => Err(CheckError::MismatchType {
+                        expected: Type::Function {
+                            arg_types: vec![],
+                            return_type: Box::new(Type::Void),
+                        },
+                        found: func_ty,
+                        expr: self.clone(),
+                    }),
+                }
+            }
+            Expr::Let { var, val, body, .. } => {
+                if **body == Expr::VOID {
+                    let val_ty = val.check(env)?;
+                    let bindings = match_pattern_types(var, &val_ty)?;
+                    env.vars.extend(bindings);
+                    body.check(env)
+                } else {
+                    let val_ty = val.check(env)?;
+                    let bindings = match_pattern_types(var, &val_ty)?;
+                    let mut new_env = env.clone();
+                    new_env.vars.extend(bindings);
+                    let body_ty = body.check(&mut new_env)?;
+                    Ok(body_ty)
+                }
+            }
+            Expr::Record(fields) => {
+                let mut field_map = BTreeMap::new();
+                for (k, v) in fields {
+                    field_map.insert(k.clone(), v.check(env)?.into());
+                }
+                Ok(Type::Record(field_map))
+            }
+            Expr::Variant(typ, variant_name, inner_expr) => {
+                let inner_ty = inner_expr.check(env)?;
+                let mut variants = BTreeMap::new();
+                variants.insert(variant_name.clone(), Box::new(inner_ty));
+                Ok(Type::Enum(variants))
+            }
+            Expr::List(exprs) => {
+                let mut elem_ty: Option<Type> = None;
+                for expr in exprs {
+                    let ty = expr.check(env)?;
+                    if let Some(existing_ty) = &elem_ty {
+                        if existing_ty != &ty {
+                            return Err(CheckError::MismatchType {
+                                expected: existing_ty.clone(),
+                                found: ty,
+                                expr: self.clone(),
+                            });
+                        }
+                    } else {
+                        elem_ty = Some(ty);
+                    }
+                }
+                Ok(Type::List(Box::new(elem_ty.unwrap_or(Type::Void))))
+            }
+            Expr::Builtin(builtin) => Ok(builtin.get_type()),
+            Expr::Macro(_) => Err(CheckError::UnexpandedMacro(self.clone())),
+            Expr::Match(scrutinee, arms) => {
+                let scrutinee_ty = scrutinee.check(env)?;
+                let mut arm_tys = Vec::new();
+                for (pat, arm_expr) in arms {
+                    let pat_ty = match_pattern_types(pat, &scrutinee_ty)?;
+                    env.vars.extend(pat_ty);
+                    arm_tys.push(arm_expr.check(env)?);
+                }
+                if arm_tys.is_empty() {
+                    return Err(CheckError::NonExhaustiveMatch(self.clone()));
+                }
+                let first_arm_ty = arm_tys[0].clone();
+                for ty in &arm_tys[1..] {
+                    if ty != &first_arm_ty {
+                        return Err(CheckError::MismatchType {
+                            expected: first_arm_ty.clone(),
+                            found: ty.clone(),
+                            expr: self.clone(),
+                        });
+                    }
+                }
+                Ok(first_arm_ty)
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                let cond_ty = cond.check(env)?;
+                if cond_ty != Type::Bool {
+                    return Err(CheckError::InvalidCondition(Const::Bool(false)));
+                }
+                let then_ty = then_expr.check(env)?;
+                let else_ty = else_expr.check(env)?;
+                if then_ty != else_ty {
+                    return Err(CheckError::MismatchType {
+                        expected: then_ty,
+                        found: else_ty,
+                        expr: self.clone(),
+                    });
+                }
+                Ok(then_ty)
+            }
+            Expr::Many(exprs) => {
+                let mut last_ty = Type::Void;
+                let old_env = env.clone();
+                for expr in exprs {
+                    last_ty = expr.check(env)?;
+                }
+                env.vars = old_env.vars;
+                Ok(last_ty)
+            }
+            Expr::Type(name, ty) => {
+                let mut new_env = env.clone();
+                new_env.types.insert(name.clone(), ty.clone());
+                Ok(Type::Name(name.clone()))
+            }
+            _ => unimplemented!(),
+        }
+    }
+
 }
 
 impl Display for Expr {
@@ -485,16 +727,228 @@ impl Display for Expr {
                 }
                 write!(f, ")")
             }
-            _ => unimplemented!(),
+            Expr::Let { var, val, body, .. } => {
+                write!(f, "let {} = {} in {}", var, val, body)
+            }
+            Expr::Record(fields) => {
+                write!(f, "{{")?;
+                for (i, (name, val)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", name, val)?;
+                }
+                write!(f, "}}")
+            }
+            Expr::Variant(typ, name, inner_expr) => {
+                write!(f, "{} of {}({})", typ, name, inner_expr)
+            }
+            Expr::List(exprs) => {
+                write!(f, "[")?;
+                for (i, v) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            Expr::Builtin(builtin) => write!(f, "<builtin: {}>", builtin.name),
+            Expr::Macro(macro_) => write!(f, "<macro: {}>", macro_.name),
+            Expr::Match(scrutinee, arms) => {
+                write!(f, "match {} {{", scrutinee)?;
+                for (i, (pat, arm_expr)) in arms.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} => {}", pat, arm_expr)?;
+                }
+                write!(f, "}}")
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                write!(f, "if {} then {} else {}", cond, then_expr, else_expr)
+            }
+            Expr::Many(exprs) => {
+                write!(f, "{{")?;
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{}", expr)?;
+                }
+                write!(f, "}}")
+            }
+            Expr::Annotated(_metadata, expr) => {
+                write!(f, "{}", expr)
+            }
+            Expr::Type(name, ty) => {
+                write!(f, "type {} = {}", name, ty)
+            }            
         }
     }
 }
 
 /// Environment for type–checking. (Not used in evaluation.)
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct CheckEnv {
     pub vars: HashMap<Symbol, Type>,
+    pub types: HashMap<Symbol, Type>,
     pub macros: HashMap<Symbol, Macro>,
     pub builtins: HashMap<Symbol, Builtin>,
+}
+
+impl CheckEnv {
+    pub fn new() -> Self {
+        CheckEnv {
+            vars: HashMap::new(),
+            types: HashMap::new(),
+            macros: HashMap::new(),
+            builtins: HashMap::new(),
+        }
+    }
+
+    pub fn get_type(&self, name: &Symbol) -> Result<Type, CheckError> {
+        self.types
+            .get(name)
+            .cloned()
+            .ok_or(CheckError::TypeNotFound(name.clone()))
+    }
+
+    pub fn get_var(&self, name: &Symbol) -> Result<Type, CheckError> {
+        self.vars
+            .get(name)
+            .cloned()
+            .ok_or(CheckError::VariableNotFound {
+                name: name.clone(),
+                expr: Expr::Var(name.clone()),
+            })
+    }
+
+    pub fn get_builtin(&self, name: &Symbol) -> Result<Builtin, CheckError> {
+        self.builtins
+            .get(name)
+            .cloned()
+            .ok_or(CheckError::VariableNotFound {
+                name: name.clone(),
+                expr: Expr::Var(name.clone()),
+            })
+    }
+
+    pub fn check(&mut self, expr: &Expr) -> Result<Type, CheckError> {
+        self.collect_type_definitions(expr)?;
+        let ty = expr.check(self)?;
+        Ok(self.simplify_type(&ty))
+    }
+
+    pub fn simplify_type(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Name(name) => self.types.get(name).cloned().unwrap_or_else(|| ty.clone()),
+            Type::Record(fields) => {
+                let mut new_fields = BTreeMap::new();
+                for (name, field_ty) in fields {
+                    new_fields.insert(name.clone(), Box::new(self.simplify_type(field_ty)));
+                }
+                Type::Record(new_fields)
+            }
+            Type::Enum(variants) => {
+                let mut new_variants = BTreeMap::new();
+                for (name, variant_ty) in variants {
+                    new_variants.insert(name.clone(), Box::new(self.simplify_type(variant_ty)));
+                }
+                Type::Enum(new_variants)
+            }
+
+            Type::List(ty) => Type::List(Box::new(self.simplify_type(ty))),
+            Type::Str | Type::Char | Type::Bool | Type::Int | Type::Float | Type::Void => ty.clone(),
+            Type::Function {
+                arg_types,
+                return_type,
+            } => Type::Function {
+                arg_types: arg_types.iter().map(|t| self.simplify_type(t)).collect(),
+                return_type: Box::new(self.simplify_type(return_type)),
+            },
+        }
+    }
+
+    pub fn collect_type_definitions(&mut self, expr: &Expr) -> Result<(), CheckError> {
+        match expr {
+            Expr::Type(name, ty) => {
+                // Define a type named `name` with the given type `ty`.
+                self.types.insert(name.clone(), ty.clone());
+            }
+            Expr::Let {
+                var,
+                ty,
+                val,
+                body,
+            } => {
+                self.collect_type_definitions(val)?;
+                self.collect_type_definitions(body)?;
+            }
+            Expr::Lam(params, body) => {
+                for (_, param_ty) in params {
+                    self.collect_type_definitions(&Expr::Type(param_ty.to_string(), param_ty.clone()))?;
+                }
+                self.collect_type_definitions(body)?;
+            }
+            Expr::App(func_expr, args_exprs) => {
+                self.collect_type_definitions(func_expr)?;
+                for arg in args_exprs {
+                    self.collect_type_definitions(arg)?;
+                }
+            }
+            Expr::Record(fields) => {
+                for (_, field_expr) in fields {
+                    self.collect_type_definitions(field_expr)?;
+                }
+            }
+            Expr::Variant(_, _, inner_expr) => {
+                self.collect_type_definitions(inner_expr)?;
+            }
+            Expr::List(exprs) => {
+                for expr in exprs {
+                    self.collect_type_definitions(expr)?;
+                }
+            }
+            Expr::Many(exprs) => {
+                for expr in exprs {
+                    self.collect_type_definitions(expr)?;
+                }
+            }
+            Expr::Match(scrutinee, arms) => {
+                self.collect_type_definitions(scrutinee)?;
+                for (pat, arm_expr) in arms {
+                    self.collect_type_definitions(arm_expr)?;
+                    match pat {
+                        Pattern::Record(fields) => {
+                            for (_, var_name) in fields {
+                                self.collect_type_definitions(&Expr::Type(var_name.clone(), Type::Void))?;
+                            }
+                        }
+                        Pattern::Variant(_, inner_pat) => {
+                            self.collect_type_definitions(&Expr::Type(inner_pat.to_string(), Type::Void))?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                self.collect_type_definitions(cond)?;
+                self.collect_type_definitions(then_expr)?;
+                self.collect_type_definitions(else_expr)?;
+            }
+            Expr::Annotated(_, expr) => {
+                self.collect_type_definitions(expr)?;
+            }
+            Expr::Macro(_) => {
+                // Macros are not expanded here, so we don't collect type definitions from them.
+            }
+            Expr::Var(_) | Expr::Builtin(_) | Expr::Const(_) => {
+                // No type definitions to collect from variables or builtins.
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Environment for evaluation.
@@ -560,6 +1014,58 @@ fn match_pattern(pattern: &Pattern, value: &Const) -> Result<HashMap<Symbol, Con
     }
 }
 
+/// Try to match a pattern against a constant value and, if successful, return a binding of variable names to constants.
+fn match_pattern_types(pattern: &Pattern, value: &Type) -> Result<HashMap<Symbol, Type>, CheckError> {
+    let mut bindings = HashMap::new();
+    match (pattern, value) {
+        (Pattern::Var(sym), v) => {
+            bindings.insert(sym.clone(), v.clone());
+            Ok(bindings)
+        }
+        (Pattern::Const(c), v) => {
+            if c.get_type() == *v {
+                Ok(bindings)
+            } else {
+                Err(CheckError::PatternMismatchType(pattern.clone(), v.clone()))
+            }
+        }
+        (Pattern::Record(pat_map), Type::Record(val_map)) => {
+            if pat_map.len() != val_map.len() {
+                return Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()));
+            }
+
+            for (key, var_name) in pat_map {
+                if let Some(val) = val_map.get(key) {
+                    bindings.insert(var_name.clone(), *val.clone());
+                } else {
+                    return Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()));
+                }
+            }
+            Ok(bindings)
+        }
+        (Pattern::Variant(variant_name, inner_pat), Type::Enum(variants)) => {
+            if let Some(inner_ty) = variants.get(variant_name) {
+                let inner_bindings = match_pattern_types(inner_pat, inner_ty)?;
+                bindings.extend(inner_bindings);
+                Ok(bindings)
+            } else {
+                Err(CheckError::PatternMismatchType(pattern.clone(), value.clone()))
+            }
+        }
+        (Pattern::List { head, tail }, Type::List(list)) => {
+            // if list.is_empty() {
+            //     return Err(CheckError::PatternMismatch(pattern.clone(), value.clone()));
+            // }
+            let head_bindings = match_pattern_types(head, list)?;
+            let tail_bindings = match_pattern_types(tail, value)?;
+            bindings.extend(head_bindings);
+            bindings.extend(tail_bindings);
+            Ok(bindings)
+        }
+        _ => Err(CheckError::PatternMismatchType(pattern.clone(), value.clone())),
+    }
+}
+
 /// Evaluate an expression in the given evaluation environment, producing a constant.
 impl Expr {
     pub fn eval(&self, env: Rc<RefCell<EvalEnv>>) -> Result<Const, CheckError> {
@@ -591,6 +1097,16 @@ impl Expr {
                     })
             }
             Expr::Lam(params, body) => {
+                // Remove any of the parameters from the environment.
+                let mut env_map = env.borrow().vars.clone();
+                for (name, _) in params {
+                    env_map.remove(name);
+                }
+                let env = Rc::new(RefCell::new(EvalEnv {
+                    vars: env_map,
+                    builtins: env.borrow().builtins.clone(),
+                }));
+
                 // Capture the current environment in the closure.
                 Ok(Const::Closure(params.clone(), body.clone(), env))
             }
@@ -609,11 +1125,19 @@ impl Expr {
                 body,
             } => {
                 let val_evaluated = val.eval(env.clone())?;
-                let bindings = match_pattern(var, &val_evaluated)?;
-                let mut new_env = env.borrow().clone();
-                new_env.vars.extend(bindings);
-                let new_env = Rc::new(RefCell::new(new_env));
-                body.eval(new_env)
+                if **body == Expr::VOID {
+                    let bindings = match_pattern(var, &val_evaluated)?;
+                    // Create a new environment with the bindings from the pattern match.
+                    env.borrow_mut().vars.extend(bindings);
+                    // Evaluate the body in the new environment.
+                    body.eval(env.clone())
+                } else {
+                    let mut new_env = env.borrow().clone();
+                    let bindings = match_pattern(var, &val_evaluated)?;
+                    new_env.vars.extend(bindings);
+                    let new_env = Rc::new(RefCell::new(new_env));
+                    body.eval(new_env)
+                }
             }
             Expr::Record(fields) => {
                 let mut rec = BTreeMap::new();
@@ -654,9 +1178,12 @@ impl Expr {
             }
             Expr::Many(exprs) => {
                 let mut last = Const::Void;
+                let old_env_vars = env.borrow().vars.clone();
                 for expr in exprs {
                     last = expr.eval(env.clone())?;
                 }
+                // Restore the original environment.
+                env.borrow_mut().vars = old_env_vars;
                 Ok(last)
             }
             Expr::Type(_, _) => Ok(Const::Void),
@@ -719,6 +1246,7 @@ mod tests {
     fn test_add_builtin() {
         let add_builtin = Builtin {
             name: "add".to_string(),
+            ty: Type::function([Type::Int, Type::Int], Type::Int),
             help_short: "Adds two integers".to_string(),
             help_long: "Usage: add x y, where x and y are integers".to_string(),
             exec: builtin_add,
@@ -751,6 +1279,7 @@ mod tests {
     fn test_let_record_pattern() {
         let add_builtin = Builtin {
             name: "add".to_string(),
+            ty: Type::function([Type::Int, Type::Int], Type::Int),
             help_short: "Adds two integers".to_string(),
             help_long: "Usage: add x y".to_string(),
             exec: builtin_add,

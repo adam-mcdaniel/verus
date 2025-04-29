@@ -5,7 +5,7 @@ use nom::{
     character::complete::{char, digit1, hex_digit1, multispace1, oct_digit1},
     combinator::{all_consuming, cut, map, map_opt, opt, recognize, verify},
     error::{ContextError, ParseError},
-    multi::{fold_many0, many0, many0_count, separated_list0, separated_list1},
+    multi::{fold_many0, many0, many0_count, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated},
     IResult, Parser,
 };
@@ -16,7 +16,7 @@ use nom::{
 };
 
 const KEYWORDS: &[&str] = &[
-    "fun", "struct", "enum", "mut", "let", "if", "else", "while", "for", "return", "match",
+    "type", "fun", "struct", "enum", "mut", "let", "if", "else", "while", "for", "return", "match",
 ];
 
 fn is_symbol_char(c: char) -> bool {
@@ -453,7 +453,7 @@ fn parse_type_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("[")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, t) = cut(parse_type)(input)?;
+    let (input, t) = parse_type(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("]")(input)?;
 
@@ -470,6 +470,7 @@ fn parse_type_primitive<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         value(Type::Char, tag("Char")),
         value(Type::Bool, tag("Bool")),
         value(Type::Void, tag("Void")),
+        value(Type::Str, tag("Str")),
     ))(input)?;
 
     Ok((input, result))
@@ -530,10 +531,10 @@ fn parse_const_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("[")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, elements) = cut(separated_list0(
+    let (input, elements) = separated_list0(
         delimited(whitespace, char(','), whitespace),
         parse_const,
-    ))(input)?;
+    )(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("]")(input)?;
 
@@ -571,7 +572,7 @@ fn parse_const_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("(")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, c) = cut(parse_const)(input)?;
+    let (input, c) = parse_const(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag(")")(input)?;
 
@@ -674,11 +675,86 @@ fn parse_expr_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((input, Expr::List(elements)))
 }
 
+fn parse_pattern_struct<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Pattern, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = opt(tag("struct"))(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("{")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, fields) = separated_list1(
+        delimited(whitespace, char(','), whitespace),
+        alt((separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_symbol,
+        ),
+        map(delimited(whitespace, parse_symbol, whitespace), |s| {
+            (s, s)
+        }))),
+    )(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("}")(input)?;
+
+    Ok((
+        input,
+        Pattern::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+    )))
+}
+
+fn parse_pattern_list<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Pattern, E> {
+    let (input, _) = whitespace(input)?;
+    // Parse a head pattern
+    let (input, head) = parse_symbol(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("|")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse a tail pattern
+    let (input, tail) = parse_pattern(input)?;
+    let (input, _) = whitespace(input)?;
+
+    Ok((input, Pattern::List {
+        head: Box::new(Pattern::var(head)),
+        tail: Box::new(tail),
+    }))
+}
+
+fn parse_pattern_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Pattern, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("of")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the variant name
+    let (input, variant) = parse_symbol(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, pat) = opt(parse_pattern)(input)?;
+    let (input, _) = whitespace(input)?;
+    let pat = if let Some(p) = pat {
+        p
+    } else {
+        Pattern::Const(Const::Void)
+    };
+
+    Ok((input, Pattern::Variant(variant.to_owned(), pat.into())))
+}
+
 fn parse_pattern<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Pattern, E> {
-    // For now, just parse a symbol as a pattern
-    map(parse_symbol, Pattern::var)(input)
+    alt((
+        map(parse_const, Pattern::Const),
+        parse_pattern_struct,
+        parse_pattern_list,
+        parse_pattern_variant,
+        map(parse_symbol, Pattern::var),
+        // map(parse_symbol, Pattern::Var),
+        // map(parse_symbol, Pattern::var),
+    ))(input)
+    // map(parse_symbol, Pattern::var)(input)
 }
 
 fn parse_expr_let<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -751,6 +827,94 @@ fn parse_expr_let_binding<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((input, (pattern, ty, expr)))
 }
 
+fn parse_expr_let_lambda<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("let")(input)?;
+
+    // Get the name of the lambda
+    let (input, name) = parse_symbol(input)?;
+    let (input, _) = whitespace(input)?;
+
+    // Parse the lambda parameters
+    // A list of (<symbol> `:` <type>) pairs
+    let (input, params) = separated_list1(
+        delimited(whitespace, char(','), whitespace),
+        separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_type,
+        ),
+    )(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the `=` sign
+    let (input, _) = tag("=")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the lambda body
+    let (input, body) = cut(parse_expr)(input)?;
+
+    let (input, _) = whitespace(input)?;
+    // Return the lambda expression
+    Ok((
+        input,
+        Expr::let_var(
+            Pattern::Var(name.to_owned()),
+            None,
+            Expr::Lam(
+                params.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect(),
+                Box::new(body),
+            ),
+            Expr::VOID,
+        ),
+    ))
+}
+
+fn parse_expr_lambda<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("\\")(input)?;
+
+    // Parse lambda parameters
+    // A list of (<symbol> `:` <type>) pairs
+    let (input, params) = separated_list1(
+        delimited(whitespace, char(','), whitespace),
+        separated_pair(
+            parse_symbol,
+            delimited(whitespace, char(':'), whitespace),
+            parse_type,
+        ),
+    )(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the `->` sign
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = whitespace(input)?;
+    // Parse the lambda body
+    let (input, body) = cut(parse_expr)(input)?;
+    let (input, _) = whitespace(input)?;
+    // Return the lambda expression
+    Ok((
+        input,
+        Expr::Lam(
+            params.into_iter().map(|(k, v)| (k.to_owned(), v.into())).collect(),
+            Box::new(body),
+        ),
+    ))
+}
+
+fn parse_expr_application<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, func) = parse_symbol(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, args) = many1(parse_expr)(input)?;
+    let (input, _) = whitespace(input)?;
+
+    Ok((input, Expr::var(func).app(args)))
+}
+
 fn parse_expr_typedef<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
@@ -810,15 +974,18 @@ fn parse_expr<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
     alt((
-        map(parse_const, Expr::Const),
         parse_expr_parenthesized,
+        map(parse_const, Expr::Const),
         parse_expr_block,
         parse_expr_record,
         parse_expr_variant,
         parse_expr_list,
         parse_expr_let,
+        parse_expr_let_lambda,
         parse_expr_typedef,
         // Allow blocks as expressions
+        parse_expr_application,
+        parse_expr_lambda,
         map(parse_symbol, Expr::var),
     ))(input)
 }
@@ -840,6 +1007,9 @@ pub fn parse(input: &str) -> Result<Expr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::cell::RefCell;
 
     #[test]
     fn test_parse_const_record() {
@@ -1137,5 +1307,48 @@ mod tests {
             println!("{input:?} -> {result:?}");
             assert_eq!(result, Ok(("", expected.clone())));
         }
+    }
+
+    #[test]
+    fn test_parse_program() -> anyhow::Result<()> {
+        let input = r#"{
+            let {x, y, z} = {x: 5, y: 6, z: 7};
+            let y = 10 in [x, y, z];
+
+            let T x: Int, y: Int = x;
+            let F x: Int, y: Int = y;
+
+            let T2 = \x: Int -> \y: Int -> x;
+            
+            let g = T2 1;
+            g
+        }"#;
+
+        let expr = parse(input);
+        println!("{input:?} -> {expr:?}");
+
+        match expr {
+            Ok(expr) => {
+                println!("Parsed expression: {:#?}", expr);
+                let mut env = CheckEnv::new();
+                let result = expr.check(&mut env);
+
+                println!("Check result: {:#?}", result);
+
+                match expr.eval(Rc::new(RefCell::new(EvalEnv::new()))) {
+                    Ok(result) => {
+                        println!("Eval result: {:#?}", result);
+                    }
+                    Err(e) => {
+                        panic!("Failed to evaluate expression: {e}");
+                    }
+                }
+            }
+            _ => {
+                panic!("Failed to parse program");
+            }
+        }
+
+        Ok(())
     }
 }
