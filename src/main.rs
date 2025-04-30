@@ -1,7 +1,9 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use tracing::*;
 use verus::*;
 
+/*
+use std::cell::RefCell;
+use std::rc::Rc;
 fn test_parse_program() -> anyhow::Result<()> {
     let input = r#"{
         let test = \x: Int -> \y: Str -> x;
@@ -39,8 +41,7 @@ fn test_parse_program() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() {
-    init_logging("debug");
+fn test_parse_program2() {
     let input = r#"{
         let test = \x:Num -> \y:Str -> x;
         
@@ -54,8 +55,18 @@ fn main() {
 
         let square = \x:Num -> x * x;
 
+        let head | tail = [1, 2, 3, 4, 5];
+        debug "Head:";
+        debug head;
+        debug "Tail:";
+        debug tail;
+
         let l = [1, 2, 3, 4, 5];
         let l1 = mapnum square l;
+
+        help rev;
+
+        info (fread "Cargo.toml");
 
         let g = test (max l1);
         g "hello!"
@@ -63,8 +74,6 @@ fn main() {
 
     match parse(input) {
         Ok(expr) => {
-            println!("Parsed expression: {:#?}", expr);
-
             let expr = Library::stdlib().import(expr);
 
             if let Err(e) = check(expr.clone()) {
@@ -82,6 +91,20 @@ fn main() {
         }
         Err(e) => {
             panic!("Failed to parse program:\n{e}");
+        }
+    }
+}
+ */
+
+fn main() {
+    init_logging("debug");
+    match cli() {
+        Ok(_) => {
+            info!("Program executed successfully");
+        }
+        Err(e) => {
+            error!("Error: {e}");
+            std::process::exit(1);
         }
     }
 }

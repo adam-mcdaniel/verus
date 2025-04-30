@@ -1,3 +1,4 @@
+use core::f64;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -7,6 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use thiserror::Error;
+
+use tracing::*;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct SourceCodeLocation {
@@ -81,6 +84,13 @@ pub enum CheckError {
         expr: Expr,
     },
 
+    #[error("Bad cast in {expr} from type {from} to {to}")]
+    BadCast {
+        from: Type,
+        to: Type,
+        expr: Expr,
+    },
+
     #[error("Invalid condition in {0} (expected Bool)")]
     InvalidCondition(Const),
 
@@ -143,6 +153,13 @@ pub enum CheckError {
 
     #[error("Ambiguous type in {0} (found {1})")]
     AmbiguousType(Expr, Type),
+
+    #[error("Index out of bounds: {index} in {expr} (length: {length})")]
+    IndexOutOfBounds {
+        index: usize,
+        length: usize,
+        expr: Expr,
+    },
 }
 
 impl From<anyhow::Error> for CheckError {
@@ -269,16 +286,23 @@ impl Type {
             }
             (Type::Int, Type::Float) => true,
             (Type::Float, Type::Int) => true,
+
             (Type::Str, Type::Char) => true,
             (Type::Char, Type::Str) => true,
 
             (Type::Bool, Type::Int) => true,
             (Type::Int, Type::Bool) => true,
 
+            (Type::Number, Type::Str) => true,
+            (Type::Str, Type::Number) => true,
+            (Type::Number, Type::Char) => true,
+            (Type::Char, Type::Number) => true,
+
             (Type::Int, Type::Number) => true,
             (Type::Float, Type::Number) => true,
             (Type::Number, Type::Int) => true,
             (Type::Number, Type::Float) => true,
+            
             _ => false,
         }
     }
@@ -621,8 +645,8 @@ impl Const {
 
     pub fn get_type(&self) -> Type {
         match self {
-            Const::Int(_) => Type::Int,
-            Const::Float(_) => Type::Float,
+            Const::Int(_) => Type::number(),
+            Const::Float(_) => Type::number(),
             Const::Str(_) => Type::Str,
             Const::Char(_) => Type::Char,
             Const::Bool(_) => Type::Bool,
@@ -769,10 +793,10 @@ impl Display for Const {
         match self {
             Int(n) => write!(f, "{}", n),
             Float(n) => write!(f, "{}", n),
-            Str(s) => write!(f, "{:?}", s),
-            Char(c) => write!(f, "{:?}", c),
+            Str(s) => write!(f, "{}", s),
+            Char(c) => write!(f, "{}", c),
             Bool(b) => write!(f, "{}", b),
-            Void => write!(f, "void"),
+            Void => write!(f, "()"),
             Record(map) => {
                 write!(f, "{{")?;
                 for (i, (name, val)) in map.iter().enumerate() {
@@ -811,6 +835,11 @@ pub enum Expr {
     Record(BTreeMap<Symbol, Expr>),
     Variant(Type, Symbol, Box<Expr>),
     List(Vec<Expr>),
+
+    Get {
+        container: Box<Expr>,
+        field: Box<Expr>,
+    },
 
     /// A type–annotated expression.
     As(Box<Expr>, Type),
@@ -894,7 +923,51 @@ impl Expr {
     }
 
     pub fn check(&self, env: &mut CheckEnv) -> Result<Type, CheckError> {
-        match self {
+        let result = match self {
+            Expr::Get { container, field } => {
+                // If the container is a list, confirm that the field is an index.
+                let container_ty = container.check(env)?;
+                match &container_ty {
+                    Type::List(elem_ty) => {
+                        let field_ty = field.check(env)?;
+                        if !field_ty.can_cast_to(&Type::Int) {
+                            return Err(CheckError::MismatchType {
+                                expected: Type::Int,
+                                found: field_ty,
+                                expr: self.clone(),
+                            });
+                        }
+                        Ok(*elem_ty.clone())
+                    }
+                    Type::Record(fields) => {
+                        // Get the field as a symbol
+                        match &**field {
+                            Expr::Var(name) => {
+                                if let Some(ty) = fields.get(name) {
+                                    Ok((**ty).clone())
+                                } else {
+                                    Err(CheckError::FieldNotFound {
+                                        container: container_ty,
+                                        name: name.clone(),
+                                        expr: self.clone(),
+                                    })
+                                }
+                            }
+                            _ => Err(CheckError::FieldNotFound {
+                                container: container_ty,
+                                name: field.to_string(),
+                                expr: self.clone(),
+                            }),
+                        }
+                    }
+                    _ => Err(CheckError::FieldNonStruct {
+                        container: container_ty,
+                        field: field.check(env)?.to_string(),
+                        expr: self.clone(),
+                    }),
+                }
+            }
+
             Expr::Annotated(_, expr) => expr.check(env),
             Expr::Const(c) => Ok(c.get_type()),
             Expr::Var(sym) => env.get_var(sym),
@@ -905,6 +978,12 @@ impl Expr {
                     new_env.vars.insert(name.clone(), ty.clone());
                 }
                 let body_ty = body.check(&mut new_env)?;
+
+                for (_, ty) in params {
+                    env.check_if_type_exists(ty)?;
+                }
+                env.check_if_type_exists(&body_ty)?;
+
                 Ok(Type::Function {
                     arg_types: params.iter().map(|(_, ty)| ty.clone()).collect(),
                     return_type: Box::new(body_ty),
@@ -916,6 +995,10 @@ impl Expr {
                     .iter()
                     .map(|arg| arg.check(env))
                     .collect::<Result<_, _>>()?;
+                env.check_if_type_exists(&func_ty)?;
+                for ty in &found_arg_types {
+                    env.check_if_type_exists(ty)?;
+                }
                 match func_ty {
                     Type::Function {
                         arg_types: param_types,
@@ -929,6 +1012,8 @@ impl Expr {
                             });
                         }
                         for (expected, found) in param_types.iter().zip(found_arg_types.iter()) {
+                            env.check_if_type_exists(expected)?;
+
                             if !found.can_be_used_as(expected) {
                                 return Err(CheckError::MismatchType {
                                     expected: expected.clone(),
@@ -952,6 +1037,8 @@ impl Expr {
             Expr::Let { var, ty, val, body } => {
                 let val_ty = val.check(env)?;
                 if let Some(expected_ty) = ty {
+                    env.check_if_type_exists(expected_ty)?;
+
                     if !val_ty.can_be_used_as(expected_ty) {
                         return Err(CheckError::MismatchType {
                             expected: expected_ty.clone(),
@@ -965,7 +1052,7 @@ impl Expr {
                     }
                 }
 
-                let bindings = match_pattern_types(var, &val_ty)?;
+                let bindings = match_pattern_types(var, &env.simplify_type(&val_ty))?;
 
                 if **body == Expr::VOID {
                     env.vars.extend(bindings);
@@ -985,10 +1072,34 @@ impl Expr {
                 Ok(Type::Record(field_map))
             }
             Expr::Variant(typ, variant_name, inner_expr) => {
+                // Confirm that the variant and the given data match
+                let typ = env.simplify_type(typ);
+                env.check_if_type_exists(&typ)?;
                 let inner_ty = inner_expr.check(env)?;
-                let mut variants = BTreeMap::new();
-                variants.insert(variant_name.clone(), Box::new(inner_ty));
-                Ok(Type::Enum(variants))
+                if let Type::Enum(variants) = &typ {
+                    if !variants.contains_key(variant_name) {
+                        return Err(CheckError::VariantNotFound {
+                            container: typ.clone(),
+                            variant: variant_name.clone(),
+                            expr: self.clone(),
+                        });
+                    }
+                    let expected_inner_ty = variants.get(variant_name).unwrap();
+                    if !inner_ty.can_be_used_as(expected_inner_ty) {
+                        return Err(CheckError::MismatchType {
+                            expected: *expected_inner_ty.clone(),
+                            found: inner_ty,
+                            expr: self.clone(),
+                        });
+                    }
+                } else {
+                    return Err(CheckError::VariantNotFound {
+                        container: typ.clone(),
+                        variant: variant_name.clone(),
+                        expr: self.clone(),
+                    });
+                }
+                Ok(typ)
             }
             Expr::List(exprs) => {
                 let mut elem_ty: Option<Type> = None;
@@ -1060,22 +1171,27 @@ impl Expr {
                 Ok(last_ty)
             }
             Expr::Type(name, ty) => {
-                let mut new_env = env.clone();
-                new_env.types.insert(name.clone(), ty.clone());
+                env.check_if_type_exists(ty)?;
+                env.types.insert(name.clone(), ty.clone());
                 Ok(Type::Name(name.clone()))
             }
             Expr::As(expr, ty) => {
+                env.check_if_type_exists(ty)?;
+
                 let expr_ty = expr.check(env)?;
                 if !expr_ty.can_cast_to(ty) {
-                    return Err(CheckError::MismatchType {
-                        expected: ty.clone(),
-                        found: expr_ty,
+                    return Err(CheckError::BadCast {
+                        from: expr_ty,
+                        to: ty.clone(),
                         expr: self.clone(),
                     });
                 }
                 Ok(ty.clone())
             }
-        }
+        }?;
+        // debug!("check: {} => {:?}", self, result);
+
+        Ok(result)
     }
 }
 
@@ -1094,6 +1210,9 @@ impl From<Builtin> for Expr {
 impl Display for Expr {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
+            Expr::Get { container, field } => {
+                write!(f, "{}@{}", container, field)
+            }
             Expr::Const(c) => write!(f, "{}", c),
             Expr::Var(sym) => write!(f, "{}", sym),
             Expr::Lam(params, body) => {
@@ -1197,6 +1316,48 @@ impl CheckEnv {
         }
     }
 
+    pub fn check_if_type_exists(&self, ty: &Type) -> Result<(), CheckError> {
+        use Type::*;
+        match ty {
+            Name(name) => {
+                if self.types.contains_key(name) {
+                    Ok(())
+                } else {
+                    Err(CheckError::TypeNotFound(name.clone()))
+                }
+            }
+            Record(fields) => {
+                for (_, field_ty) in fields {
+                    self.check_if_type_exists(field_ty)?;
+                }
+                Ok(())
+            }
+            Enum(variants) => {
+                for (_, variant_ty) in variants {
+                    self.check_if_type_exists(variant_ty)?;
+                }
+                Ok(())
+            }
+            OneOf(tys) => {
+                for ty in tys {
+                    self.check_if_type_exists(ty)?;
+                }
+                Ok(())
+            }
+            List(ty) => self.check_if_type_exists(ty),
+            Any | Str | Char | Bool | Int | Float | Number | Void => Ok(()),
+            Function {
+                arg_types,
+                return_type,
+            } => {
+                for arg_ty in arg_types {
+                    self.check_if_type_exists(arg_ty)?;
+                }
+                self.check_if_type_exists(return_type)
+            }
+        }
+    }
+
     pub fn get_type(&self, name: &Symbol) -> Result<Type, CheckError> {
         self.types
             .get(name)
@@ -1226,13 +1387,20 @@ impl CheckEnv {
 
     pub fn check(&mut self, expr: &Expr) -> Result<Type, CheckError> {
         self.collect_type_definitions(expr)?;
+        println!("types: {:?}", self.types);
         let ty = expr.check(self)?;
+        self.check_if_type_exists(&ty)?;
         Ok(self.simplify_type(&ty))
     }
 
     pub fn simplify_type(&self, ty: &Type) -> Type {
         match ty {
-            Type::Name(name) => self.types.get(name).cloned().unwrap_or_else(|| ty.clone()),
+            Type::Name(name) => self
+                .types
+                .get(name)
+                .cloned()
+                .ok_or_else(|| CheckError::TypeNotFound(name.clone()))
+                .unwrap_or_else(|_| ty.clone()),
             Type::Record(fields) => {
                 let mut new_fields = BTreeMap::new();
                 for (name, field_ty) in fields {
@@ -1272,11 +1440,15 @@ impl CheckEnv {
 
     pub fn collect_type_definitions(&mut self, expr: &Expr) -> Result<(), CheckError> {
         match expr {
+            Expr::Get { container, field } => {
+                self.collect_type_definitions(container)?;
+                self.collect_type_definitions(field)?;
+            }
             Expr::Type(name, ty) => {
                 // Define a type named `name` with the given type `ty`.
                 self.types.insert(name.clone(), ty.clone());
             }
-            Expr::Let { var, ty, val, body } => {
+            Expr::Let { val, body, .. } => {
                 self.collect_type_definitions(val)?;
                 self.collect_type_definitions(body)?;
             }
@@ -1426,6 +1598,7 @@ fn match_pattern_types(
     pattern: &Pattern,
     value: &Type,
 ) -> Result<HashMap<Symbol, Type>, CheckError> {
+    // debug!("match_pattern_types: {:?} against {:?}", pattern, value);
     let mut bindings = HashMap::new();
     match (pattern, value) {
         (Pattern::Var(sym), v) => {
@@ -1490,8 +1663,47 @@ fn match_pattern_types(
 
 /// Evaluate an expression in the given evaluation environment, producing a constant.
 impl Expr {
+    pub fn get(&self, field: impl Into<Expr>) -> Expr {
+        Expr::Get {
+            container: Box::new(self.clone()),
+            field: Box::new(field.into()),
+        }
+    }
+
     pub fn eval(&self, env: Rc<RefCell<EvalEnv>>) -> Result<Const, CheckError> {
         match self {
+            Expr::Get { container, field } => {
+                let container_val = container.eval(env.clone())?;
+                match container_val {
+                    Const::Record(fields) => {
+                        if let Some(val) = fields.get(&field.to_string()) {
+                            Ok(val.clone())
+                        } else {
+                            Err(anyhow::anyhow!("Invalid index: {}", field.to_string()))?
+                        }
+                    }
+                    Const::List(list) => match field.eval(env.clone())? {
+                        Const::Int(index) => {
+                            let index = index as usize;
+                            if index < list.len() {
+                                Ok(list[index].clone())
+                            } else {
+                                Err(CheckError::IndexOutOfBounds {
+                                    index,
+                                    length: list.len(),
+                                    expr: self.clone(),
+                                })
+                            }
+                        }
+                        _ => Err(anyhow::anyhow!("Invalid index: {}", field.to_string()))?,
+                    },
+                    _ => Err(CheckError::FieldNonStruct {
+                        container: container_val.get_type(),
+                        field: field.to_string(),
+                        expr: self.clone(),
+                    }),
+                }
+            }
             Expr::Annotated(metadata, expr) => {
                 // Evaluate the inner expression and attach metadata to the result.
                 expr.strip_annotations()
@@ -1518,17 +1730,102 @@ impl Expr {
                         expr: self.clone(),
                     })
             }
-            Expr::As(expr, ty) => {
+            Expr::As(expr, desired_ty) => {
                 let result = expr.eval(env.clone())?;
                 let found_ty = result.get_type();
-                if !found_ty.can_cast_to(ty) {
-                    return Err(CheckError::MismatchType {
-                        expected: ty.clone(),
-                        found: found_ty,
+                if !found_ty.can_cast_to(desired_ty) {
+                    return Err(CheckError::BadCast {
+                        to: desired_ty.clone(),
+                        from: found_ty,
                         expr: self.clone(),
                     });
                 }
-                Ok(result)
+
+                match (&found_ty, desired_ty) {
+                    (Type::Int, Type::Float) => {
+                        if let Const::Int(i) = result {
+                            Ok(Const::Float(i as f64))
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+                    (Type::Float, Type::Int) => {
+                        if let Const::Float(f) = result {
+                            Ok(Const::Int(f as i64))
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+                    (Type::Str, Type::Number) => {
+                        if let Const::Str(s) = result {
+                            // First try integer
+                            if let Ok(i) = s.parse::<i64>() {
+                                Ok(Const::Int(i))
+                            } else if let Ok(f) = s.parse::<f64>() {
+                                Ok(Const::Float(f))
+                            } else {
+                                Ok(Const::Float(f64::NAN))
+                            }
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+                    (Type::Number, Type::Str) => {
+                        if let Const::Int(i) = result {
+                            Ok(Const::Str(i.to_string()))
+                        } else if let Const::Float(f) = result {
+                            Ok(Const::Str(f.to_string()))
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+
+                    (Type::Char, Type::Str) => {
+                        if let Const::Char(c) = result {
+                            Ok(Const::Str(c.to_string()))
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+                    (Type::Str, Type::Char) => {
+                        if let Const::Str(s) = result {
+                            if s.len() == 1 {
+                                Ok(Const::Char(s.chars().next().unwrap()))
+                            } else {
+                                Ok(Const::Char('\0'))
+                            }
+                        } else {
+                            Err(CheckError::BadCast {
+                                to: desired_ty.clone(),
+                                from: found_ty,
+                                expr: self.clone(),
+                            })
+                        }
+                    }
+                    _ => {
+                        Ok(result)
+                    }
+                }
             }
             Expr::Lam(params, body) => {
                 // Remove any of the parameters from the environment.
