@@ -115,11 +115,13 @@ builtin!(
         let arg1 = args[0].clone();
         let arg2 = args[1].clone();
         Ok(match (arg1, arg2) {
-            (Const::Int(i1), Const::Int(i2)) => if i1 % i2 == 0 {
-                Const::Int(i1 / i2)
-            } else {
-                Const::Float(i1 as f64 / i2 as f64)
-            },
+            (Const::Int(i1), Const::Int(i2)) => {
+                if i1 % i2 == 0 {
+                    Const::Int(i1 / i2)
+                } else {
+                    Const::Float(i1 as f64 / i2 as f64)
+                }
+            }
             (Const::Float(f1), Const::Float(f2)) => Const::Float(f1 / f2),
             (Const::Int(i), Const::Float(f)) => Const::Float(i as f64 / f),
             (Const::Float(f), Const::Int(i)) => Const::Float(f / i as f64),

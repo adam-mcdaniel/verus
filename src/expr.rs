@@ -85,11 +85,7 @@ pub enum CheckError {
     },
 
     #[error("Bad cast in {expr} from type {from} to {to}")]
-    BadCast {
-        from: Type,
-        to: Type,
-        expr: Expr,
-    },
+    BadCast { from: Type, to: Type, expr: Expr },
 
     #[error("Invalid condition in {0} (expected Bool)")]
     InvalidCondition(Const),
@@ -302,7 +298,7 @@ impl Type {
             (Type::Float, Type::Number) => true,
             (Type::Number, Type::Int) => true,
             (Type::Number, Type::Float) => true,
-            
+
             _ => false,
         }
     }
@@ -1823,9 +1819,7 @@ impl Expr {
                             })
                         }
                     }
-                    _ => {
-                        Ok(result)
-                    }
+                    _ => Ok(result),
                 }
             }
             Expr::Lam(params, body) => {

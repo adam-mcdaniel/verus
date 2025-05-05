@@ -7,7 +7,7 @@ use std::rc::Rc;
 fn test_parse_program() -> anyhow::Result<()> {
     let input = r#"{
         let test = \x: Int -> \y: Str -> x;
-        
+
         let x = (let test = 5 in test);
         let g = test x;
         g "hello!"
@@ -44,7 +44,7 @@ fn test_parse_program() -> anyhow::Result<()> {
 fn test_parse_program2() {
     let input = r#"{
         let test = \x:Num -> \y:Str -> x;
-        
+
         let fact n:Num = product (range 1 n + 1);
 
         let test1 = min (append [1, 2, 3, 5, 4] (-1));

@@ -16,8 +16,8 @@ use nom::{
 };
 
 const KEYWORDS: &[&str] = &[
-    "case", "type", "fun", "struct", "enum", "mut", "let", "if", "in", "then", "else", "while", "for",
-    "return", "match", "with", "as"
+    "case", "type", "fun", "struct", "enum", "mut", "let", "if", "in", "then", "else", "while",
+    "for", "return", "match", "with", "as",
 ];
 
 fn is_symbol_char(c: char) -> bool {
@@ -1073,7 +1073,11 @@ fn parse_expr_match<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     // Parse a list of match arms
     let (input, arms) = separated_list1(
         delimited(whitespace, tag(","), whitespace),
-        separated_pair(preceded(tag("case"), parse_pattern), delimited(whitespace, tag("=>"), whitespace), map(parse_expr, Box::new)),
+        separated_pair(
+            preceded(tag("case"), parse_pattern),
+            delimited(whitespace, tag("=>"), whitespace),
+            map(parse_expr, Box::new),
+        ),
     )(input)?;
 
     Ok((input, Expr::Match(Box::new(expr), arms)))
@@ -1240,15 +1244,10 @@ fn parse_expr_get<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     // let (input, _) = whitespace(input)?;
     // let (input, field) = parse_symbol(input)?;
 
-    let (input, fields) = many0(
-        preceded(
-            delimited(whitespace, char('@'), whitespace),
-            alt((
-                map(parse_symbol, Expr::var),
-                parse_expr_atom,
-            ))
-        )
-    )(input)?;
+    let (input, fields) = many0(preceded(
+        delimited(whitespace, char('@'), whitespace),
+        alt((map(parse_symbol, Expr::var), parse_expr_atom)),
+    ))(input)?;
 
     for field in fields {
         expr = expr.get(field);
