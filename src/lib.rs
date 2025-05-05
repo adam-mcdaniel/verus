@@ -2,6 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::str::FromStr;
 
+pub mod cli;
+pub use cli::*;
+
 pub mod expr;
 pub use expr::*;
 
@@ -30,7 +33,7 @@ pub fn check(expr: impl Into<Expr>) -> Result<Type, CheckError> {
     if let Err(e) = &result {
         error!("Check failed: {e}");
     } else {
-        debug!("Check result: {result:?}");
+        // debug!("Check result: {result:?}");
     }
     result
 }
@@ -43,7 +46,7 @@ pub fn eval(expr: impl Into<Expr>) -> Result<Const, CheckError> {
     if let Err(e) = &result {
         error!("Eval failed: {e}");
     } else {
-        debug!("Eval result: {result:?}");
+        // debug!("Eval result: {result:?}");
     }
     result
 }

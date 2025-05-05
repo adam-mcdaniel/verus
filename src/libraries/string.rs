@@ -212,6 +212,21 @@ builtin!(
     }
 );
 
+builtin!(
+    STRCAT,
+    Type::function([Type::Str, Type::Str], Type::Str),
+    "Concatenate two strings",
+    "Take two strings and return their concatenation.",
+    |args| {
+        let arg1 = args[0].clone();
+        let arg2 = args[1].clone();
+        Ok(match (arg1, arg2) {
+            (Const::Str(s1), Const::Str(s2)) => Const::Str(s1 + &s2),
+            _ => Err(anyhow::anyhow!("Expected two strings"))?,
+        })
+    }
+);
+
 pub fn create_string_library() -> Library {
     Library::new([
         STRLEN.clone(),
@@ -220,6 +235,7 @@ pub fn create_string_library() -> Library {
         TRIM.clone(),
         STRSPLIT.clone(),
         JOIN.clone(),
+        STRCAT.clone(),
         STRCONTAINS.clone(),
         STRREPLACE.clone(),
         STARTS_WITH.clone(),

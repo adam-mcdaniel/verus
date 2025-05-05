@@ -5,7 +5,7 @@ use nom::{
     character::complete::{char, digit1, hex_digit1, multispace1, oct_digit1},
     combinator::{all_consuming, cut, map, map_opt, opt, recognize, verify},
     error::{ContextError, ParseError},
-    multi::{fold_many0, many0, many0_count, many1, separated_list0, separated_list1},
+    multi::{fold_many0, many0, many0_count, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated},
     IResult, Parser,
 };
@@ -16,8 +16,8 @@ use nom::{
 };
 
 const KEYWORDS: &[&str] = &[
-    "type", "fun", "struct", "enum", "mut", "let", "if", "in", "then", "else", "while", "for",
-    "return", "match",
+    "case", "type", "fun", "struct", "enum", "mut", "let", "if", "in", "then", "else", "while",
+    "for", "return", "match", "with", "as",
 ];
 
 fn is_symbol_char(c: char) -> bool {
@@ -484,7 +484,7 @@ fn parse_type_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("(")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, t) = cut(parse_type)(input)?;
+    let (input, t) = parse_type(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag(")")(input)?;
 
@@ -656,7 +656,7 @@ fn parse_expr_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, variant) = parse_symbol(input)?;
     let (input, _) = whitespace(input)?;
     // Parse the value
-    let (input, value) = opt(parse_expr)(input)?;
+    let (input, value) = opt(parse_expr_atom)(input)?;
 
     Ok((
         input,
@@ -674,7 +674,7 @@ fn parse_expr_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, _) = whitespace(input)?;
     let (input, _) = tag("(")(input)?;
     let (input, _) = whitespace(input)?;
-    let (input, e) = cut(parse_expr)(input)?;
+    let (input, e) = parse_expr(input)?;
     let (input, _) = whitespace(input)?;
     let (input, _) = tag(")")(input)?;
 
@@ -772,17 +772,29 @@ fn parse_pattern_variant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     Ok((input, Pattern::Variant(variant.to_owned(), pat.into())))
 }
 
+fn parse_pattern_parenthesized<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Pattern, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("(")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, p) = parse_pattern(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag(")")(input)?;
+
+    Ok((input, p))
+}
+
 fn parse_pattern<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Pattern, E> {
     alt((
+        parse_pattern_parenthesized,
         map(parse_const, Pattern::Const),
         parse_pattern_struct,
         parse_pattern_list,
         parse_pattern_variant,
         map(parse_symbol, Pattern::var),
-        // map(parse_symbol, Pattern::Var),
-        // map(parse_symbol, Pattern::var),
     ))(input)
     // map(parse_symbol, Pattern::var)(input)
 }
@@ -1047,6 +1059,30 @@ fn parse_expr<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     ))(input)
 }
 
+fn parse_expr_match<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, _) = tag("match")(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, expr) = cut(parse_expr)(input)?;
+    let (input, _) = whitespace(input)?;
+    let (input, _) = cut(tag("with"))(input)?;
+    let (input, _) = whitespace(input)?;
+
+    // Parse a list of match arms
+    let (input, arms) = separated_list1(
+        delimited(whitespace, tag(","), whitespace),
+        separated_pair(
+            preceded(tag("case"), parse_pattern),
+            delimited(whitespace, tag("=>"), whitespace),
+            map(parse_expr, Box::new),
+        ),
+    )(input)?;
+
+    Ok((input, Expr::Match(Box::new(expr), arms)))
+}
+
 fn parse_expr_application<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
@@ -1138,6 +1174,7 @@ fn parse_expr_additive<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     let (input, head) = parse_expr_multiplicative(input)?;
     let (input, tail) = many0(pair(
         alt((
+            value(crate::libraries::string::STRCAT.clone(), tag("&")),
             value(crate::libraries::ADD.clone(), tag("+")),
             value(crate::libraries::SUBTRACT.clone(), tag("-")),
         )),
@@ -1191,23 +1228,46 @@ fn parse_expr_unary<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         let (input, _) = whitespace(input)?;
         return Ok((input, Expr::from(op).app([e])));
     } else {
-        let (input, e) = parse_expr_atom(input)?;
+        let (input, e) = parse_expr_get(input)?;
         let (input, _) = whitespace(input)?;
         return Ok((input, e));
     }
+}
+
+fn parse_expr_get<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    input: &'a str,
+) -> IResult<&'a str, Expr, E> {
+    let (input, _) = whitespace(input)?;
+    let (input, mut expr) = parse_expr_atom(input)?;
+    let (input, _) = whitespace(input)?;
+    // let (input, _) = tag("@")(input)?;
+    // let (input, _) = whitespace(input)?;
+    // let (input, field) = parse_symbol(input)?;
+
+    let (input, fields) = many0(preceded(
+        delimited(whitespace, char('@'), whitespace),
+        alt((map(parse_symbol, Expr::var), parse_expr_atom)),
+    ))(input)?;
+
+    for field in fields {
+        expr = expr.get(field);
+    }
+
+    Ok((input, expr))
 }
 
 fn parse_expr_atom<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     input: &'a str,
 ) -> IResult<&'a str, Expr, E> {
     alt((
+        parse_expr_match,
         parse_expr_if_else,
         parse_expr_if,
         parse_expr_parenthesized,
+        parse_expr_variant,
         map(parse_const, Expr::Const),
         parse_expr_block,
         parse_expr_record,
-        parse_expr_variant,
         parse_expr_list,
         // Allow blocks as expressions
         map(parse_symbol, Expr::var),
@@ -1232,7 +1292,6 @@ pub fn parse(input: &str) -> Result<Expr, String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     #[test]
@@ -1297,10 +1356,10 @@ mod tests {
     fn test_parse_const_variant() {
         let input_and_expected = [
             (
-                "{Some(Int) | None} of None",
+                "{Some(Num) | None} of None",
                 Const::variant(
                     Type::enum_variants([
-                        ("Some".to_owned(), Type::Int),
+                        ("Some".to_owned(), Type::number()),
                         ("None".to_owned(), Type::Void),
                     ]),
                     "None",
@@ -1308,10 +1367,10 @@ mod tests {
                 ),
             ),
             (
-                "{Some(Int) | None} of Some(5)",
+                "{Some(Num) | None} of Some(5)",
                 Const::variant(
                     Type::enum_variants([
-                        ("Some".to_owned(), Type::Int),
+                        ("Some".to_owned(), Type::number()),
                         ("None".to_owned(), Type::Void),
                     ]),
                     "Some",
@@ -1360,18 +1419,18 @@ mod tests {
     fn test_parse_type_enum() -> anyhow::Result<()> {
         let input_and_expected = [
             (
-                "{Some(Int) | None}",
+                "{Some(Num) | None}",
                 Type::enum_variants([
-                    ("Some".to_owned(), Type::Int),
+                    ("Some".to_owned(), Type::number()),
                     ("None".to_owned(), Type::Void),
                 ]),
             ),
             (
-                "{Some(Int) | None | Another(Float)}",
+                "{Some(Num) | None | Another(Bool)}",
                 Type::enum_variants([
-                    ("Some".to_owned(), Type::Int),
+                    ("Some".to_owned(), Type::number()),
                     ("None".to_owned(), Type::Void),
-                    ("Another".to_owned(), Type::Float),
+                    ("Another".to_owned(), Type::Bool),
                 ]),
             ),
         ];
@@ -1403,10 +1462,10 @@ mod tests {
                 ),
             ),
             (
-                "let x: Int = 5 in [x]",
+                "let x: Num = 5 in [x]",
                 Expr::let_var(
                     Pattern::var("x"),
-                    Some(Type::Int), // Explicit type annotation
+                    Some(Type::number()), // Explicit type annotation
                     Const::Int(5),
                     Expr::list([Expr::var("x")]),
                 ),
@@ -1416,10 +1475,10 @@ mod tests {
                 Expr::let_var(Pattern::var("x"), None, Const::Int(5), Expr::VOID),
             ),
             (
-                "let x: Int = 5",
+                "let x: Num = 5",
                 Expr::let_var(
                     Pattern::var("x"),
-                    Some(Type::Int), // Explicit type annotation
+                    Some(Type::number()), // Explicit type annotation
                     Const::Int(5),
                     Expr::VOID,
                 ),
@@ -1473,10 +1532,10 @@ mod tests {
                 ),
             ),
             (
-                "let x: Int = 5 in [x];",
+                "let x: Num = 5 in [x];",
                 Expr::let_var(
                     Pattern::var("x"),
-                    Some(Type::Int),
+                    Some(Type::number()),
                     Const::Int(5),
                     Expr::list([Expr::var("x")]),
                 ),
@@ -1521,8 +1580,8 @@ mod tests {
                 ]),
             ),
             (
-                "type MyType = Int;",
-                Expr::Type("MyType".to_owned(), Type::Int),
+                "type MyType = Num;",
+                Expr::Type("MyType".to_owned(), Type::number()),
             ),
         ];
 
