@@ -3,10 +3,20 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tracing::*;
 
+pub const LOGO: &str = r#"
+
+ █████ █████  ██████  ████████  █████ ████  █████      
+░░███ ░░███  ███░░███░░███░░███░░███ ░███  ███░░       
+ ░███  ░███ ░███████  ░███ ░░░  ░███ ░███ ░░█████      
+ ░░███ ███  ░███░░░   ░███      ░███ ░███  ░░░░███     
+  ░░█████   ░░██████  █████     ░░████████ ██████      
+   ░░░░░     ░░░░░░  ░░░░░       ░░░░░░░░ ░░░░░░       
+"#;
+
 #[derive(Debug, Parser)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about, long_about = Some(LOGO))]
 struct Args {
-    /// The input file to compile
+    /// The input file to typecheck and evaluate
     input_file: Option<String>,
     args: Vec<String>,
 }

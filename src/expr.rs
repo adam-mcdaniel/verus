@@ -1037,9 +1037,10 @@ impl Expr {
             Expr::Let { var, ty, val, body } => {
                 let val_ty = val.check(env)?;
                 if let Some(expected_ty) = ty {
-                    env.check_if_type_exists(expected_ty)?;
+                    let expected_ty = env.simplify_type(expected_ty);
+                    env.check_if_type_exists(&expected_ty)?;
 
-                    if !val_ty.can_be_used_as(expected_ty) {
+                    if !val_ty.can_be_used_as(&expected_ty) {
                         return Err(CheckError::MismatchType {
                             expected: expected_ty.clone(),
                             found: val_ty,
@@ -1191,7 +1192,7 @@ impl Expr {
         }?;
         // debug!("check: {} => {:?}", self, result);
 
-        Ok(result)
+        Ok(env.simplify_type(&result))
     }
 }
 

@@ -69,7 +69,7 @@ builtin!(
     PRINT,
     Type::function([Type::Any], Type::Void),
     "Print a value",
-    "Take a value and print it to the console.",
+    "Take any arbitrary value or constant and print it to the console.",
     |args| {
         let arg1 = args[0].clone();
         println!("{}", arg1);
@@ -81,7 +81,7 @@ builtin!(
     PRINTLN,
     Type::function([Type::Any], Type::Void),
     "Print a value with a newline",
-    "Take a value and print it to the console with a newline.",
+    "Take any arbitrary value or constant and print it to the console with a newline.",
     |args| {
         let arg1 = args[0].clone();
         println!("{}", arg1);
