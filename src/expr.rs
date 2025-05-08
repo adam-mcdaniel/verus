@@ -935,12 +935,10 @@ impl Expr {
                         }
                         // Ok(*elem_ty.clone())
 
-                        Ok(
-                            Type::enum_variants([
-                                ("Some".into(), (**elem_ty).clone()),
-                                ("None".into(), Type::Void),
-                            ])
-                        )
+                        Ok(Type::enum_variants([
+                            ("Some".into(), (**elem_ty).clone()),
+                            ("None".into(), Type::Void),
+                        ]))
                     }
                     Type::Record(fields) => {
                         // Get the field as a symbol
@@ -1698,7 +1696,7 @@ impl Expr {
                                         ("None".into(), Type::Void),
                                     ]),
                                     "Some".into(),
-                                    list[index].clone().into()
+                                    list[index].clone().into(),
                                 ))
                             } else {
                                 // Err(CheckError::IndexOutOfBounds {
@@ -1713,7 +1711,7 @@ impl Expr {
                                         ("None".into(), Type::Void),
                                     ]),
                                     "None".into(),
-                                    Const::Void.into()
+                                    Const::Void.into(),
                                 ))
                             }
                         }
