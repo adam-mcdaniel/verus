@@ -933,7 +933,14 @@ impl Expr {
                                 expr: self.clone(),
                             });
                         }
-                        Ok(*elem_ty.clone())
+                        // Ok(*elem_ty.clone())
+
+                        Ok(
+                            Type::enum_variants([
+                                ("Some".into(), (**elem_ty).clone()),
+                                ("None".into(), Type::Void),
+                            ])
+                        )
                     }
                     Type::Record(fields) => {
                         // Get the field as a symbol
@@ -1681,15 +1688,33 @@ impl Expr {
                     }
                     Const::List(list) => match field.eval(env.clone())? {
                         Const::Int(index) => {
+                            let elem_ty = list[0].get_type();
+
                             let index = index as usize;
                             if index < list.len() {
-                                Ok(list[index].clone())
+                                Ok(Const::Variant(
+                                    Type::enum_variants([
+                                        ("Some".into(), elem_ty.clone()),
+                                        ("None".into(), Type::Void),
+                                    ]),
+                                    "Some".into(),
+                                    list[index].clone().into()
+                                ))
                             } else {
-                                Err(CheckError::IndexOutOfBounds {
-                                    index,
-                                    length: list.len(),
-                                    expr: self.clone(),
-                                })
+                                // Err(CheckError::IndexOutOfBounds {
+                                //     index,
+                                //     length: list.len(),
+                                //     expr: self.clone(),
+                                // })
+
+                                Ok(Const::Variant(
+                                    Type::enum_variants([
+                                        ("Some".into(), elem_ty.clone()),
+                                        ("None".into(), Type::Void),
+                                    ]),
+                                    "None".into(),
+                                    Const::Void.into()
+                                ))
                             }
                         }
                         _ => Err(anyhow::anyhow!("Invalid index: {}", field.to_string()))?,
